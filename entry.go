@@ -186,15 +186,6 @@ func (e *Entry) isFilter() bool {
 	meta := e.Meta
 	var filterDataSet = []uint16{
 		DataDeleteFlag,
-		DataRPopFlag,
-		DataLPopFlag,
-		DataLRemFlag,
-		DataLTrimFlag,
-		DataZRemFlag,
-		DataZRemRangeByRankFlag,
-		DataZPopMaxFlag,
-		DataZPopMinFlag,
-		DataLRemByIndex,
 	}
 	return OneOfUint16Array(meta.Flag, filterDataSet)
 }
@@ -242,17 +233,6 @@ func (e *Entry) IsBelongsToBPlusTree() bool {
 	return e.Meta.IsBPlusTree()
 }
 
-func (e *Entry) IsBelongsToList() bool {
-	return e.Meta.IsList()
-}
-
-func (e *Entry) IsBelongsToSet() bool {
-	return e.Meta.IsSet()
-}
-
-func (e *Entry) IsBelongsToSortSet() bool {
-	return e.Meta.IsSortSet()
-}
 
 // Entries represents entries
 type Entries []*Entry

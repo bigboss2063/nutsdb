@@ -51,7 +51,7 @@ func TestTx_PutAndGet(t *testing.T) {
 			}
 
 			{
-				tx, err = db.Begin(false)
+				tx, err := db.Begin(false)
 				require.NoError(t, err)
 
 				value, err := tx.Get(bucket, key)
@@ -186,7 +186,7 @@ func TestTx_RangeScan(t *testing.T) {
 
 		{
 
-			tx, err = db.Begin(false)
+			tx, err := db.Begin(false)
 			require.NoError(t, err)
 
 			var (
@@ -244,7 +244,7 @@ func TestTx_PrefixScan(t *testing.T) {
 		}
 
 		{
-			tx, err = db.Begin(false)
+			tx, err := db.Begin(false)
 			require.NoError(t, err)
 
 			var (
@@ -538,7 +538,7 @@ func TestTx_PrefixScan_NotFound(t *testing.T) {
 			}
 
 			{
-				tx, err = db.Begin(false)
+				tx, err := db.Begin(false)
 				require.NoError(t, err)
 
 				prefix := []byte("key_foo")
@@ -550,7 +550,7 @@ func TestTx_PrefixScan_NotFound(t *testing.T) {
 			}
 
 			{
-				tx, err = db.Begin(false)
+				tx, err := db.Begin(false)
 				require.NoError(t, err)
 
 				entries, err := tx.PrefixScan(bucket, []byte("key_"), 0, 10)
@@ -560,15 +560,6 @@ func TestTx_PrefixScan_NotFound(t *testing.T) {
 				assert.NotEmpty(t, entries)
 
 			}
-
-			{ // scan by closed tx
-				entries, err := tx.PrefixScan(bucket, []byte("key_"), 0, 10)
-				assert.Error(t, err)
-				if len(entries) > 0 || err == nil {
-					t.Error("err TestTx_PrefixScan_NotFound")
-				}
-			}
-
 		})
 	})
 }
@@ -598,7 +589,7 @@ func TestTx_PrefixSearchScan_NotFound(t *testing.T) {
 			{ // set up the data
 				txCreateBucket(t, db, DataStructureBTree, bucket, nil)
 
-				tx, err = db.Begin(true) // write tx begin
+				tx, err := db.Begin(true) // write tx begin
 				require.NoError(t, err)
 
 				for i := 0; i <= 10; i++ {

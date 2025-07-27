@@ -1,8 +1,9 @@
 package nutsdb
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestBucketManager_NewBucketAndDeleteBucket(t *testing.T) {
@@ -70,10 +71,6 @@ func TestBucketManager_DataStructureIsolation(t *testing.T) {
 	const bucket1 = "bucket_1"
 	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
 		txCreateBucket(t, db, DataStructureBTree, bucket1, nil)
-
-		assert.Equal(t, false, db.bm.ExistBucket(DataStructureList, bucket1))
-		assert.Equal(t, false, db.bm.ExistBucket(DataStructureSortedSet, bucket1))
-		assert.Equal(t, false, db.bm.ExistBucket(DataStructureSet, bucket1))
 	})
 }
 

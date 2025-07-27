@@ -15,7 +15,7 @@
 package nutsdb
 
 type IdxType interface {
-	BTree | Set | SortedSet | List
+	BTree
 }
 
 type defaultOp[T IdxType] struct {
@@ -50,16 +50,6 @@ func (op *defaultOp[T]) rangeIdx(f func(elem *T)) {
 	}
 }
 
-type ListIdx struct {
-	*defaultOp[List]
-}
-
-func (idx ListIdx) getWithDefault(id BucketId) *List {
-	return idx.defaultOp.computeIfAbsent(id, func() *List {
-		return NewList()
-	})
-}
-
 type BTreeIdx struct {
 	*defaultOp[BTree]
 }
@@ -70,38 +60,12 @@ func (idx BTreeIdx) getWithDefault(id BucketId) *BTree {
 	})
 }
 
-type SetIdx struct {
-	*defaultOp[Set]
-}
-
-func (idx SetIdx) getWithDefault(id BucketId) *Set {
-	return idx.defaultOp.computeIfAbsent(id, func() *Set {
-		return NewSet()
-	})
-}
-
-type SortedSetIdx struct {
-	*defaultOp[SortedSet]
-}
-
-func (idx SortedSetIdx) getWithDefault(id BucketId, db *DB) *SortedSet {
-	return idx.defaultOp.computeIfAbsent(id, func() *SortedSet {
-		return NewSortedSet(db)
-	})
-}
-
 type index struct {
-	list      ListIdx
-	bTree     BTreeIdx
-	set       SetIdx
-	sortedSet SortedSetIdx
+	bTree BTreeIdx
 }
 
 func newIndex() *index {
 	i := new(index)
-	i.list = ListIdx{&defaultOp[List]{idx: map[BucketId]*List{}}}
 	i.bTree = BTreeIdx{&defaultOp[BTree]{idx: map[BucketId]*BTree{}}}
-	i.set = SetIdx{&defaultOp[Set]{idx: map[BucketId]*Set{}}}
-	i.sortedSet = SortedSetIdx{&defaultOp[SortedSet]{idx: map[BucketId]*SortedSet{}}}
 	return i
 }

@@ -161,7 +161,7 @@ func TestIsPrefixScan(t *testing.T) {
 				assert.NoError(t, tx.Commit())
 			}
 			{
-				tx, err = db.Begin(false)
+				tx, err := db.Begin(false)
 				require.NoError(t, err)
 				prefix := []byte("key_")
 				es, err := tx.PrefixScan(bucket, prefix, 0, 10)
@@ -171,7 +171,7 @@ func TestIsPrefixScan(t *testing.T) {
 				assert.Equal(t, false, got)
 			}
 			{
-				tx, err = db.Begin(false)
+				tx, err := db.Begin(false)
 				require.NoError(t, err)
 				prefix := []byte("foo_")
 				es, err := tx.PrefixScan(bucket, prefix, 0, 10)
@@ -203,7 +203,7 @@ func TestIsPrefixSearchScan(t *testing.T) {
 				assert.NoError(t, tx.Commit())
 			}
 			{
-				tx, err = db.Begin(false)
+				tx, err := db.Begin(false)
 				require.NoError(t, err)
 				prefix := []byte("key_")
 				es, err := tx.PrefixSearchScan(bucket, prefix, regs, 0, 10)
@@ -213,7 +213,7 @@ func TestIsPrefixSearchScan(t *testing.T) {
 				assert.Equal(t, false, got)
 			}
 			{
-				tx, err = db.Begin(false)
+				tx, err := db.Begin(false)
 				require.NoError(t, err)
 				prefix := []byte("foo_")
 				es, err := tx.PrefixSearchScan(bucket, prefix, regs, 0, 10)

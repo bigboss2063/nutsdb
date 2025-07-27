@@ -548,35 +548,6 @@ func (db *DB) getRecordCount() (int64, error) {
 		res += int64(btree.Count())
 	}
 
-	// Iterate through the List indices
-	for _, listItem := range db.Index.list.idx {
-		for key := range listItem.Items {
-			curLen, err := listItem.Size(key)
-			if err != nil {
-				return res, err
-			}
-			res += int64(curLen)
-		}
-	}
-
-	// Iterate through the Set indices
-	for _, setItem := range db.Index.set.idx {
-		for key := range setItem.M {
-			res += int64(setItem.SCard(key))
-		}
-	}
-
-	// Iterate through the SortedSet indices
-	for _, zsetItem := range db.Index.sortedSet.idx {
-		for key := range zsetItem.M {
-			curLen, err := zsetItem.ZCard(key)
-			if err != nil {
-				return res, err
-			}
-			res += int64(curLen)
-		}
-	}
-
 	return res, nil
 }
 
@@ -617,162 +588,15 @@ func (db *DB) buildIdxes(record *Record, entry *Entry) error {
 	switch meta.Ds {
 	case DataStructureBTree:
 		return db.buildBTreeIdx(record, entry)
-	case DataStructureList:
-		if err := db.buildListIdx(record, entry); err != nil {
-			return err
-		}
-	case DataStructureSet:
-		if err := db.buildSetIdx(record, entry); err != nil {
-			return err
-		}
-	case DataStructureSortedSet:
-		if err := db.buildSortedSetIdx(record, entry); err != nil {
-			return err
-		}
 	default:
 		panic(fmt.Sprintf("there is an unexpected data structure that is unimplemented in our database.:%d", meta.Ds))
 	}
-	return nil
 }
 
 func (db *DB) deleteBucket(ds uint16, bucket BucketId) {
-	if ds == DataStructureSet {
-		db.Index.set.delete(bucket)
-	}
-	if ds == DataStructureSortedSet {
-		db.Index.sortedSet.delete(bucket)
-	}
 	if ds == DataStructureBTree {
 		db.Index.bTree.delete(bucket)
 	}
-	if ds == DataStructureList {
-		db.Index.list.delete(bucket)
-	}
-}
-
-// buildSetIdx builds set index when opening the DB.
-func (db *DB) buildSetIdx(record *Record, entry *Entry) error {
-	key, val, meta := entry.Key, entry.Value, entry.Meta
-
-	bucket, err := db.bm.GetBucketById(entry.Meta.BucketId)
-	if err != nil {
-		return err
-	}
-	bucketId := bucket.Id
-
-	s := db.Index.set.getWithDefault(bucketId)
-
-	switch meta.Flag {
-	case DataSetFlag:
-		if err := s.SAdd(string(key), [][]byte{val}, []*Record{record}); err != nil {
-			return fmt.Errorf("when build SetIdx SAdd index err: %s", err)
-		}
-	case DataDeleteFlag:
-		if err := s.SRem(string(key), val); err != nil {
-			return fmt.Errorf("when build SetIdx SRem index err: %s", err)
-		}
-	}
-
-	return nil
-}
-
-// buildSortedSetIdx builds sorted set index when opening the DB.
-func (db *DB) buildSortedSetIdx(record *Record, entry *Entry) error {
-	key, val, meta := entry.Key, entry.Value, entry.Meta
-
-	bucket, err := db.bm.GetBucketById(entry.Meta.BucketId)
-	if err != nil {
-		return err
-	}
-	bucketId := bucket.Id
-
-	ss := db.Index.sortedSet.getWithDefault(bucketId, db)
-
-	switch meta.Flag {
-	case DataZAddFlag:
-		keyAndScore := strings.Split(string(key), SeparatorForZSetKey)
-		if len(keyAndScore) == 2 {
-			key := keyAndScore[0]
-			score, _ := strconv2.StrToFloat64(keyAndScore[1])
-			err = ss.ZAdd(key, SCORE(score), val, record)
-		}
-	case DataZRemFlag:
-		_, err = ss.ZRem(string(key), val)
-	case DataZRemRangeByRankFlag:
-		start, end := splitIntIntStr(string(val), SeparatorForZSetKey)
-		err = ss.ZRemRangeByRank(string(key), start, end)
-	case DataZPopMaxFlag:
-		_, _, err = ss.ZPopMax(string(key))
-	case DataZPopMinFlag:
-		_, _, err = ss.ZPopMin(string(key))
-	}
-
-	// We don't need to panic if sorted set is not found.
-	if err != nil && !errors.Is(err, ErrSortedSetNotFound) {
-		return fmt.Errorf("when build sortedSetIdx err: %s", err)
-	}
-
-	return nil
-}
-
-// buildListIdx builds List index when opening the DB.
-func (db *DB) buildListIdx(record *Record, entry *Entry) error {
-	key, val, meta := entry.Key, entry.Value, entry.Meta
-
-	bucket, err := db.bm.GetBucketById(entry.Meta.BucketId)
-	if err != nil {
-		return err
-	}
-	bucketId := bucket.Id
-
-	l := db.Index.list.getWithDefault(bucketId)
-
-	if IsExpired(meta.TTL, meta.Timestamp) {
-		return nil
-	}
-
-	switch meta.Flag {
-	case DataExpireListFlag:
-		t, _ := strconv2.StrToInt64(string(val))
-		ttl := uint32(t)
-		l.TTL[string(key)] = ttl
-		l.TimeStamp[string(key)] = meta.Timestamp
-	case DataLPushFlag:
-		err = l.LPush(string(key), record)
-	case DataRPushFlag:
-		err = l.RPush(string(key), record)
-	case DataLRemFlag:
-		err = db.buildListLRemIdx(val, l, key)
-	case DataLPopFlag:
-		_, err = l.LPop(string(key))
-	case DataRPopFlag:
-		_, err = l.RPop(string(key))
-	case DataLTrimFlag:
-		newKey, start := splitStringIntStr(string(key), SeparatorForListKey)
-		end, _ := strconv2.StrToInt(string(val))
-		err = l.LTrim(newKey, start, end)
-	case DataLRemByIndex:
-		indexes, _ := UnmarshalInts(val)
-		err = l.LRemByIndex(string(key), indexes)
-	}
-
-	if err != nil {
-		return fmt.Errorf("when build listIdx err: %s", err)
-	}
-
-	return nil
-}
-
-func (db *DB) buildListLRemIdx(value []byte, l *List, key []byte) error {
-	count, newValue := splitIntStringStr(string(value), SeparatorForListKey)
-
-	return l.LRem(string(key), count, func(r *Record) (bool, error) {
-		v, err := db.getValueByRecord(r)
-		if err != nil {
-			return false, err
-		}
-		return bytes.Equal([]byte(newValue), v), nil
-	})
 }
 
 // buildIndexes builds indexes when db initialize resource.
@@ -858,14 +682,6 @@ func (db *DB) sendToWriteCh(tx *Tx) (*request, error) {
 	req.IncrRef()     // for db write
 	db.writeCh <- req // Handled in doWrites.
 	return req, nil
-}
-
-func (db *DB) checkListExpired() {
-	db.Index.list.rangeIdx(func(l *List) {
-		for key := range l.TTL {
-			l.IsExpire(key)
-		}
-	})
 }
 
 // IsClose return the value that represents the status of DB

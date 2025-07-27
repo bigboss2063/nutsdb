@@ -18,11 +18,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	"github.com/bwmarrin/snowflake"
-	"github.com/xujiajun/utils/strconv2"
 )
 
 const (
@@ -298,91 +296,6 @@ func (tx *Tx) getNewAddRecordCount() (int64, error) {
 	return res, err
 }
 
-func (tx *Tx) getListHeadTailSeq(bucketId BucketId, key string) *HeadTailSeq {
-	res := HeadTailSeq{Head: initialListSeq, Tail: initialListSeq + 1}
-
-	// 首先尝试从索引中获取已存在的序列号
-	if _, ok := tx.db.Index.list.idx[bucketId]; ok {
-		if seq, ok := tx.db.Index.list.idx[bucketId].Seq[key]; ok {
-			res = *seq
-			return &res
-		}
-
-		// 如果索引中没有序列号，但存在列表项，则从现有项推断序列号
-		if l, ok := tx.db.Index.list.idx[bucketId]; ok {
-			if items, ok := l.Items[key]; ok && items.Count() > 0 {
-				// 获取现有列表中的最小和最大序列号
-				allItems := items.AllItems()
-				if len(allItems) > 0 {
-					minSeq := ConvertBigEndianBytesToUint64(allItems[0].key)
-					maxSeq := ConvertBigEndianBytesToUint64(allItems[len(allItems)-1].key)
-					res = HeadTailSeq{Head: minSeq - 1, Tail: maxSeq + 1}
-
-					// 更新索引中的序列号
-					l.Seq[key] = &res
-				}
-			}
-		}
-	}
-
-	return &res
-}
-
-func (tx *Tx) getListEntryNewAddRecordCount(bucketId BucketId, entry *Entry) (int64, error) {
-	if entry.Meta.Flag == DataExpireListFlag {
-		return 0, nil
-	}
-
-	var res int64
-	key := string(entry.Key)
-	value := string(entry.Value)
-	l := tx.db.Index.list.getWithDefault(bucketId)
-
-	switch entry.Meta.Flag {
-	case DataLPushFlag, DataRPushFlag:
-		res++
-	case DataLPopFlag, DataRPopFlag:
-		res--
-	case DataLRemByIndex:
-		indexes, _ := UnmarshalInts([]byte(value))
-		res -= int64(len(l.getValidIndexes(key, indexes)))
-	case DataLRemFlag:
-		count, newValue := splitIntStringStr(value, SeparatorForListKey)
-		removeIndices, err := l.getRemoveIndexes(key, count, func(r *Record) (bool, error) {
-			v, err := tx.db.getValueByRecord(r)
-			if err != nil {
-				return false, err
-			}
-			return bytes.Equal([]byte(newValue), v), nil
-		})
-		if err != nil {
-			return 0, err
-		}
-		res -= int64(len(removeIndices))
-	case DataLTrimFlag:
-		newKey, start := splitStringIntStr(key, SeparatorForListKey)
-		end, _ := strconv2.StrToInt(value)
-
-		if l.IsExpire(newKey) {
-			return 0, nil
-		}
-
-		if _, ok := l.Items[newKey]; !ok {
-			return 0, nil
-		}
-
-		items, err := l.LRange(newKey, start, end)
-		if err != nil {
-			return res, err
-		}
-
-		list := l.Items[newKey]
-		res -= int64(list.Count() - len(items))
-	}
-
-	return res, nil
-}
-
 func (tx *Tx) getKvEntryNewAddRecordCount(bucketId BucketId, entry *Entry) (int64, error) {
 	var res int64
 
@@ -403,58 +316,6 @@ func (tx *Tx) getKvEntryNewAddRecordCount(bucketId BucketId, entry *Entry) (int6
 	return res, nil
 }
 
-func (tx *Tx) getSetEntryNewAddRecordCount(bucketId BucketId, entry *Entry) (int64, error) {
-	var res int64
-
-	if entry.Meta.Flag == DataDeleteFlag {
-		res--
-	}
-
-	if entry.Meta.Flag == DataSetFlag {
-		res++
-	}
-
-	return res, nil
-}
-
-func (tx *Tx) getSortedSetEntryNewAddRecordCount(bucketId BucketId, entry *Entry) (int64, error) {
-	var res int64
-	key := string(entry.Key)
-	value := string(entry.Value)
-
-	switch entry.Meta.Flag {
-	case DataZAddFlag:
-		if !tx.keyExistsInSortedSet(bucketId, key, value) {
-			res++
-		}
-	case DataZRemFlag:
-		res--
-	case DataZRemRangeByRankFlag:
-		start, end := splitIntIntStr(value, SeparatorForZSetKey)
-		delNodes, err := tx.db.Index.sortedSet.getWithDefault(bucketId, tx.db).getZRemRangeByRankNodes(key, start, end)
-		if err != nil {
-			return res, err
-		}
-		res -= int64(len(delNodes))
-	case DataZPopMaxFlag, DataZPopMinFlag:
-		res--
-	}
-
-	return res, nil
-}
-
-func (tx *Tx) keyExistsInSortedSet(bucketId BucketId, key, value string) bool {
-	if _, exist := tx.db.Index.sortedSet.exist(bucketId); !exist {
-		return false
-	}
-	newKey := key
-	if strings.Contains(key, SeparatorForZSetKey) {
-		newKey, _ = splitStringFloat64Str(key, SeparatorForZSetKey)
-	}
-	exists, _ := tx.db.Index.sortedSet.idx[bucketId].ZExist(newKey, []byte(value))
-	return exists
-}
-
 func (tx *Tx) getEntryNewAddRecordCount(entry *Entry) (int64, error) {
 	var res int64
 	var err error
@@ -467,18 +328,6 @@ func (tx *Tx) getEntryNewAddRecordCount(entry *Entry) (int64, error) {
 
 	if entry.Meta.Ds == DataStructureBTree {
 		res, err = tx.getKvEntryNewAddRecordCount(bucketId, entry)
-	}
-
-	if entry.Meta.Ds == DataStructureList {
-		res, err = tx.getListEntryNewAddRecordCount(bucketId, entry)
-	}
-
-	if entry.Meta.Ds == DataStructureSet {
-		res, err = tx.getSetEntryNewAddRecordCount(bucketId, entry)
-	}
-
-	if entry.Meta.Ds == DataStructureSortedSet {
-		res, err = tx.getSortedSetEntryNewAddRecordCount(bucketId, entry)
 	}
 
 	return res, err
@@ -702,12 +551,8 @@ func (tx *Tx) buildIdxes(records []*Record, entries []*Entry) error {
 		switch meta.Ds {
 		case DataStructureBTree:
 			err = tx.db.buildBTreeIdx(records[i], entry)
-		case DataStructureList:
-			err = tx.db.buildListIdx(records[i], entry)
-		case DataStructureSet:
-			err = tx.db.buildSetIdx(records[i], entry)
-		case DataStructureSortedSet:
-			err = tx.db.buildSortedSetIdx(records[i], entry)
+		default:
+			panic(fmt.Sprintf("there is an unexpected data structure that is unimplemented in our database.:%d", meta.Ds))
 		}
 
 		if err != nil {
@@ -751,12 +596,6 @@ func (tx *Tx) buildBucketInIndex() error {
 				switch bucket.Ds {
 				case DataStructureBTree:
 					tx.db.Index.bTree.getWithDefault(bucket.Id)
-				case DataStructureList:
-					tx.db.Index.list.getWithDefault(bucket.Id)
-				case DataStructureSet:
-					tx.db.Index.set.getWithDefault(bucket.Id)
-				case DataStructureSortedSet:
-					tx.db.Index.sortedSet.getWithDefault(bucket.Id, tx.db)
 				default:
 					return ErrDataStructureNotSupported
 				}
@@ -764,12 +603,6 @@ func (tx *Tx) buildBucketInIndex() error {
 				switch bucket.Ds {
 				case DataStructureBTree:
 					tx.db.Index.bTree.delete(bucket.Id)
-				case DataStructureList:
-					tx.db.Index.list.delete(bucket.Id)
-				case DataStructureSet:
-					tx.db.Index.set.delete(bucket.Id)
-				case DataStructureSortedSet:
-					tx.db.Index.sortedSet.delete(bucket.Id)
 				default:
 					return ErrDataStructureNotSupported
 				}
@@ -813,26 +646,6 @@ func (tx *Tx) getChangeCountInBucketChanges() int64 {
 			case DataStructureBTree:
 				if bTree, ok := tx.db.Index.bTree.idx[bucketId]; ok {
 					res -= int64(bTree.Count())
-				}
-			case DataStructureSet:
-				if set, ok := tx.db.Index.set.idx[bucketId]; ok {
-					for key := range set.M {
-						res -= int64(set.SCard(key))
-					}
-				}
-			case DataStructureSortedSet:
-				if sortedSet, ok := tx.db.Index.sortedSet.idx[bucketId]; ok {
-					for key := range sortedSet.M {
-						curLen, _ := sortedSet.ZCard(key)
-						res -= int64(curLen)
-					}
-				}
-			case DataStructureList:
-				if list, ok := tx.db.Index.list.idx[bucketId]; ok {
-					for key := range list.Items {
-						curLen, _ := list.Size(key)
-						res -= int64(curLen)
-					}
 				}
 			default:
 				panic(fmt.Sprintf("there is an unexpected data structure that is unimplemented in our database.:%d", bucket.Ds))

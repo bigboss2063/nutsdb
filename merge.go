@@ -15,15 +15,12 @@
 package nutsdb
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"time"
-
-	"github.com/xujiajun/utils/strconv2"
 )
 
 var ErrDontNeedMerge = errors.New("the number of files waiting to be merged is at least 2")
@@ -132,13 +129,6 @@ func (db *DB) merge() error {
 							return err
 						}
 						bucketName := bucket.Name
-						if entry.Meta.Flag == DataLPushFlag {
-							return tx.LPushRaw(bucketName, entry.Key, entry.Value)
-						}
-
-						if entry.Meta.Flag == DataRPushFlag {
-							return tx.RPushRaw(bucketName, entry.Key, entry.Value)
-						}
 
 						return tx.put(
 							bucketName,
@@ -226,12 +216,6 @@ func (db *DB) isPendingMergeEntry(entry *Entry) bool {
 	switch {
 	case entry.IsBelongsToBPlusTree():
 		return db.isPendingBtreeEntry(bucketId, entry)
-	case entry.IsBelongsToList():
-		return db.isPendingListEntry(bucketId, entry)
-	case entry.IsBelongsToSet():
-		return db.isPendingSetEntry(bucketId, entry)
-	case entry.IsBelongsToSortSet():
-		return db.isPendingZSetEntry(bucketId, entry)
 	}
 	return false
 }
@@ -258,89 +242,4 @@ func (db *DB) isPendingBtreeEntry(bucketId BucketId, entry *Entry) bool {
 	}
 
 	return true
-}
-
-func (db *DB) isPendingSetEntry(bucketId BucketId, entry *Entry) bool {
-	setIdx, exist := db.Index.set.exist(bucketId)
-	if !exist {
-		return false
-	}
-
-	isMember, err := setIdx.SIsMember(string(entry.Key), entry.Value)
-	if err != nil || !isMember {
-		return false
-	}
-
-	return true
-}
-
-func (db *DB) isPendingZSetEntry(bucketId BucketId, entry *Entry) bool {
-	key, score := splitStringFloat64Str(string(entry.Key), SeparatorForZSetKey)
-	sortedSetIdx, exist := db.Index.sortedSet.exist(bucketId)
-	if !exist {
-		return false
-	}
-	s, err := sortedSetIdx.ZScore(key, entry.Value)
-	if err != nil || s != score {
-		return false
-	}
-
-	return true
-}
-
-func (db *DB) isPendingListEntry(bucketId BucketId, entry *Entry) bool {
-	var userKeyStr string
-	var curSeq uint64
-	var userKey []byte
-
-	if entry.Meta.Flag == DataExpireListFlag {
-		userKeyStr = string(entry.Key)
-		list, exist := db.Index.list.exist(bucketId)
-		if !exist {
-			return false
-		}
-
-		if _, ok := list.Items[userKeyStr]; !ok {
-			return false
-		}
-
-		t, _ := strconv2.StrToInt64(string(entry.Value))
-		ttl := uint32(t)
-		if _, ok := list.TTL[userKeyStr]; !ok {
-			return false
-		}
-
-		if list.TTL[userKeyStr] != ttl || list.TimeStamp[userKeyStr] != entry.Meta.Timestamp {
-			return false
-		}
-
-		return true
-	}
-
-	if entry.Meta.Flag == DataLPushFlag || entry.Meta.Flag == DataRPushFlag {
-		userKey, curSeq = decodeListKey(entry.Key)
-		userKeyStr = string(userKey)
-
-		list, exist := db.Index.list.exist(bucketId)
-		if !exist {
-			return false
-		}
-
-		if _, ok := list.Items[userKeyStr]; !ok {
-			return false
-		}
-
-		r, ok := list.Items[userKeyStr].Find(ConvertUint64ToBigEndianBytes(curSeq))
-		if !ok {
-			return false
-		}
-
-		if !bytes.Equal(r.Key, entry.Key) || r.TxID != entry.Meta.TxID || r.Timestamp != entry.Meta.Timestamp {
-			return false
-		}
-
-		return true
-	}
-
-	return false
 }
