@@ -222,34 +222,87 @@ func (tx *Tx) getAllOrKeysOrValues(bucket string, typ uint8) ([][]byte, [][]byte
 		return nil, nil, err
 	}
 
-	bucketId, err := tx.db.bm.GetBucketID(DataStructureBTree, bucket)
-	if err != nil {
-		return nil, nil, err
+	status, b := tx.getBucketAndItsStatus(DataStructureBTree, bucket)
+	if isBucketNotFoundStatus(status) {
+		return nil, nil, ErrNotFoundBucket
 	}
-
-	idx, bucketExists := tx.db.Index.bTree.exist(bucketId)
-	if !bucketExists {
-		return [][]byte{}, [][]byte{}, nil
-	}
-
-	records := idx.All()
+	bucketId := b.Id
 
 	var (
 		keys   [][]byte
 		values [][]byte
+		err    error
 	)
 
-	switch typ {
-	case getAllType:
-		keys, values, err = tx.getHintIdxDataItemsWrapper(records, ScanNoLimit, bucketId, true, true)
-	case getKeysType:
-		keys, _, err = tx.getHintIdxDataItemsWrapper(records, ScanNoLimit, bucketId, true, false)
-	case getValuesType:
-		_, values, err = tx.getHintIdxDataItemsWrapper(records, ScanNoLimit, bucketId, false, true)
+	// Get deleted keys from pending writes to filter database results
+	deletedKeys := tx.pendingWrites.getDeletedKeys(bucket, nil)
+
+	idx, bucketExists := tx.db.Index.bTree.exist(bucketId)
+	if bucketExists {
+		records := idx.All()
+
+		switch typ {
+		case getAllType:
+			keys, values, err = tx.getHintIdxDataItemsWrapper(records, ScanNoLimit, bucketId, true, true)
+			if err != nil {
+				return nil, nil, err
+			}
+		case getKeysType:
+			keys, _, err = tx.getHintIdxDataItemsWrapper(records, ScanNoLimit, bucketId, true, false)
+			if err != nil {
+				return nil, nil, err
+			}
+		case getValuesType:
+			// Need keys for proper merging even in values-only case
+			keys, values, err = tx.getHintIdxDataItemsWrapper(records, ScanNoLimit, bucketId, true, true)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+
+		// Filter out keys that are deleted in pending writes
+		if len(deletedKeys) > 0 {
+			filteredKeys := make([][]byte, 0, len(keys))
+			var filteredValues [][]byte
+			if len(values) > 0 {
+				filteredValues = make([][]byte, 0, len(values))
+			}
+
+			for i, key := range keys {
+				if !deletedKeys[string(key)] {
+					filteredKeys = append(filteredKeys, key)
+					if len(values) > 0 && i < len(values) {
+						filteredValues = append(filteredValues, values[i])
+					}
+				}
+			}
+			keys = filteredKeys
+			if len(values) > 0 {
+				values = filteredValues
+			}
+		}
 	}
 
-	if err != nil {
-		return nil, nil, err
+	// Get pending writes
+	var pendingKeys, pendingValues [][]byte
+	switch typ {
+	case getAllType:
+		pendingKeys, pendingValues = tx.pendingWrites.getAllOrKeysOrValues(bucket, true, true)
+	case getKeysType:
+		pendingKeys, pendingValues = tx.pendingWrites.getAllOrKeysOrValues(bucket, true, false)
+	case getValuesType:
+		// Need both keys and values for proper merging
+		pendingKeys, pendingValues = tx.pendingWrites.getAllOrKeysOrValues(bucket, true, true)
+	}
+
+	// Merge pending writes with database data
+	if len(pendingKeys) > 0 || len(pendingValues) > 0 {
+		keys, values = mergeKeyValues(pendingKeys, pendingValues, keys, values)
+	}
+
+	// Return only values for getValuesType
+	if typ == getValuesType {
+		return nil, values, nil
 	}
 
 	return keys, values, nil
@@ -312,13 +365,21 @@ func (tx *Tx) RangeScanEntries(bucket string, start, end []byte, includeKeys, in
 		return nil, nil, ErrNotFoundBucket
 	}
 	bucketId := b.Id
+
+	// Get entries from pending writes (already filtered for deleted entries)
 	pendingKeys, pendingValues := tx.pendingWrites.getDataByRange(start, end, b.Name)
+
+	// Get the set of deleted keys to filter database results
+	deletedKeys := tx.pendingWrites.getDeletedKeys(b.Name, nil)
+
 	if index, ok := tx.db.Index.bTree.exist(bucketId); ok {
 		records := index.Range(start, end)
 
-		// 如果需要合并 pending，则必须拿到 keys 进行有序 merge；
-		// 否则可以按需提取，避免不必要的 keys 分配。
-		needKeysForMerge := includeKeys || len(pendingKeys) > 0
+		// We need keys for merge if:
+		// 1. User explicitly requests keys
+		// 2. There are pending writes to merge
+		// 3. There are deleted keys to filter from DB results
+		needKeysForMerge := includeKeys || len(pendingKeys) > 0 || len(deletedKeys) > 0
 
 		keys, values, err = tx.getHintIdxDataItemsWrapper(
 			records, ScanNoLimit, bucketId, needKeysForMerge, includeValues,
@@ -328,9 +389,28 @@ func (tx *Tx) RangeScanEntries(bucket string, start, end []byte, includeKeys, in
 			// return error itself.
 			return nil, nil, err
 		}
+
+		// Filter out keys that have been deleted in pending writes
+		if len(deletedKeys) > 0 && len(keys) > 0 {
+			filteredKeys := make([][]byte, 0, len(keys))
+			var filteredValues [][]byte
+			if includeValues {
+				filteredValues = make([][]byte, 0, len(values))
+			}
+
+			for i, key := range keys {
+				if !deletedKeys[string(key)] {
+					filteredKeys = append(filteredKeys, key)
+					if includeValues && values != nil {
+						filteredValues = append(filteredValues, values[i])
+					}
+				}
+			}
+			keys = filteredKeys
+			values = filteredValues
+		}
 	}
 
-	// 仅当存在 pending 时才进行 merge，避免 values-only 且无 pending 的场景强制构建 keys。
 	if len(pendingKeys) > 0 || len(pendingValues) > 0 {
 		keys, values = mergeKeyValues(pendingKeys, pendingValues, keys, values)
 	}
@@ -386,25 +466,82 @@ func (tx *Tx) PrefixScanEntries(bucket string, prefix []byte, reg string, offset
 		return ErrPrefixSearchScan
 	}
 
+	// Get deleted keys from pending writes to filter database results
+	deletedKeys := tx.pendingWrites.getDeletedKeys(bucket, prefix)
+
+	// Get data from database
 	if idx, ok := tx.db.Index.bTree.exist(bucketId); ok {
 		var records []*data.Record
 		if reg == "" {
-			records = idx.PrefixScan(prefix, offsetNum, limitNum)
+			// For prefix scan without regex, get all matching records (no limit yet)
+			records = idx.PrefixScan(prefix, 0, -1)
 		} else {
-			records = idx.PrefixSearchScan(prefix, reg, offsetNum, limitNum)
+			// For prefix search scan with regex, get all matching records (no limit yet)
+			records = idx.PrefixSearchScan(prefix, reg, 0, -1)
 		}
-		keys, values, err = tx.getHintIdxDataItemsWrapper(records, limitNum, bucketId, includeKeys, includeValues)
+		// Need both keys and values for merging, even if only one is requested
+		keys, values, err = tx.getHintIdxDataItemsWrapper(records, ScanNoLimit, bucketId, true, true)
 		if err != nil {
 			return nil, nil, xerr(err)
 		}
+
+		// Filter out keys that are deleted in pending writes
+		if len(deletedKeys) > 0 {
+			filteredKeys := make([][]byte, 0, len(keys))
+			filteredValues := make([][]byte, 0, len(values))
+			for i, key := range keys {
+				if !deletedKeys[string(key)] {
+					filteredKeys = append(filteredKeys, key)
+					filteredValues = append(filteredValues, values[i])
+				}
+			}
+			keys = filteredKeys
+			values = filteredValues
+		}
 	}
 
+	// Get pending writes with the same prefix
+	// Note: regex filtering is not applied to pending writes yet
+	// TODO: support regex for pending writes if needed
+	pendingKeys, pendingValues := tx.pendingWrites.prefixScanEntries(bucket, prefix, true, true)
+
+	// Merge pending writes with database data
+	if len(pendingKeys) > 0 || len(pendingValues) > 0 {
+		keys, values = mergeKeyValues(pendingKeys, pendingValues, keys, values)
+	}
+
+	// Apply offset and limit after merging
+	if offsetNum > 0 {
+		if offsetNum >= len(keys) {
+			keys = nil
+			values = nil
+		} else {
+			keys = keys[offsetNum:]
+			values = values[offsetNum:]
+		}
+	}
+
+	if limitNum > 0 && len(keys) > limitNum {
+		keys = keys[:limitNum]
+		values = values[:limitNum]
+	}
+
+	// Filter results based on what was requested
+	if !includeKeys {
+		keys = nil
+	}
+	if !includeValues {
+		values = nil
+	}
+
+	// Check if results are empty
 	if includeKeys && len(keys) == 0 {
 		return nil, nil, xerr(err)
 	}
 	if includeValues && len(values) == 0 {
 		return nil, nil, xerr(err)
 	}
+
 	return
 }
 

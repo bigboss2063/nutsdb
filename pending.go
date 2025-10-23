@@ -117,6 +117,8 @@ func (pending *pendingEntryList) GetTTL(ds Ds, bucket string, key []byte) (ttl i
 	return int64(expireTime(rec.Meta.Timestamp, rec.Meta.TTL).Seconds()), nil
 }
 
+// getDataByRange returns keys and values in the range [start, end] from pending writes.
+// It excludes deleted entries (entries with DataDeleteFlag).
 func (pending *pendingEntryList) getDataByRange(
 	start, end []byte, bucketName BucketName,
 ) (keys, values [][]byte) {
@@ -128,6 +130,10 @@ func (pending *pendingEntryList) getDataByRange(
 	keys = make([][]byte, 0)
 	values = make([][]byte, 0)
 	for _, v := range mp {
+		// Skip deleted entries
+		if v.Meta != nil && v.Meta.Flag == DataDeleteFlag {
+			continue
+		}
 		if bytes.Compare(start, v.Key) <= 0 && bytes.Compare(v.Key, end) <= 0 {
 			keys = append(keys, v.Key)
 			values = append(values, v.Value)
@@ -138,6 +144,124 @@ func (pending *pendingEntryList) getDataByRange(
 		v: values,
 	})
 	return
+}
+
+// getAllOrKeysOrValues returns keys and/or values based on type
+// typ: getAllType(0), getKeysType(1), getValuesType(2)
+// It excludes deleted entries (entries with DataDeleteFlag)
+func (pending *pendingEntryList) getAllOrKeysOrValues(bucket string, includeKeys, includeValues bool) (keys, values [][]byte) {
+	mp, ok := pending.entriesInBTree[bucket]
+	if !ok {
+		return nil, nil
+	}
+
+	// Collect non-deleted entries
+	var activeEntries []*Entry
+	for _, entry := range mp {
+		// Skip deleted entries (Meta.Flag == DataDeleteFlag)
+		if entry.Meta != nil && entry.Meta.Flag == DataDeleteFlag {
+			continue
+		}
+		activeEntries = append(activeEntries, entry)
+	}
+
+	if len(activeEntries) == 0 {
+		return nil, nil
+	}
+
+	// Sort entries by key
+	sort.Slice(activeEntries, func(i, j int) bool {
+		return bytes.Compare(activeEntries[i].Key, activeEntries[j].Key) < 0
+	})
+
+	// Extract keys and values
+	if includeKeys {
+		keys = make([][]byte, 0, len(activeEntries))
+	}
+	if includeValues {
+		values = make([][]byte, 0, len(activeEntries))
+	}
+
+	for _, entry := range activeEntries {
+		if includeKeys {
+			keys = append(keys, entry.Key)
+		}
+		if includeValues {
+			values = append(values, entry.Value)
+		}
+	}
+
+	return
+}
+
+// prefixScanEntries returns keys and/or values with given prefix from pending writes
+// It returns active (non-deleted) entries and deleted keys separately
+func (pending *pendingEntryList) prefixScanEntries(bucket string, prefix []byte, includeKeys, includeValues bool) (keys, values [][]byte) {
+	mp, ok := pending.entriesInBTree[bucket]
+	if !ok {
+		return nil, nil
+	}
+
+	// Collect entries matching the prefix (excluding deleted entries)
+	var matchedEntries []*Entry
+	for _, entry := range mp {
+		if bytes.HasPrefix(entry.Key, prefix) {
+			// Skip deleted entries (Meta.Flag == DataDeleteFlag)
+			if entry.Meta != nil && entry.Meta.Flag == DataDeleteFlag {
+				continue
+			}
+			matchedEntries = append(matchedEntries, entry)
+		}
+	}
+
+	if len(matchedEntries) == 0 {
+		return nil, nil
+	}
+
+	// Sort entries by key
+	sort.Slice(matchedEntries, func(i, j int) bool {
+		return bytes.Compare(matchedEntries[i].Key, matchedEntries[j].Key) < 0
+	})
+
+	// Extract keys and values
+	if includeKeys {
+		keys = make([][]byte, 0, len(matchedEntries))
+	}
+	if includeValues {
+		values = make([][]byte, 0, len(matchedEntries))
+	}
+
+	for _, entry := range matchedEntries {
+		if includeKeys {
+			keys = append(keys, entry.Key)
+		}
+		if includeValues {
+			values = append(values, entry.Value)
+		}
+	}
+
+	return
+}
+
+// getDeletedKeys returns a set of deleted keys with given prefix from pending writes
+// If prefix is nil or empty, it returns all deleted keys
+func (pending *pendingEntryList) getDeletedKeys(bucket string, prefix []byte) map[string]bool {
+	mp, ok := pending.entriesInBTree[bucket]
+	if !ok {
+		return nil
+	}
+
+	deletedKeys := make(map[string]bool)
+	for _, entry := range mp {
+		if entry.Meta != nil && entry.Meta.Flag == DataDeleteFlag {
+			// If prefix is provided, filter by prefix; otherwise include all deleted keys
+			if len(prefix) == 0 || bytes.HasPrefix(entry.Key, prefix) {
+				deletedKeys[string(entry.Key)] = true
+			}
+		}
+	}
+
+	return deletedKeys
 }
 
 // rangeBucket input a range handler function f and call it with every bucket in pendingBucketList

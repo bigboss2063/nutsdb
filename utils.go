@@ -134,32 +134,52 @@ func mergeKeyValues(
 	// Pre-allocate capacity with estimated maximum size to reduce slice re-growth
 	estimatedSize := l0 + l1
 	keys = make([][]byte, 0, estimatedSize)
-	values = make([][]byte, 0, estimatedSize)
+
+	hasValues := v0 != nil || v1 != nil
+	if hasValues {
+		values = make([][]byte, 0, estimatedSize)
+	}
+
 	cur0 := 0
 	cur1 := 0
 	for cur0 < l0 && cur1 < l1 {
-		if bytes.Compare(k0[cur0], k1[cur1]) <= 0 {
+		cmp := bytes.Compare(k0[cur0], k1[cur1])
+		if cmp < 0 {
+			// k0 < k1
 			keys = append(keys, k0[cur0])
-			values = append(values, v0[cur0])
-			cur0++
-			if bytes.Equal(k0[cur0], k1[cur1]) {
-				// skip k1 item if k0 == k1
-				cur1++
+			if hasValues && v0 != nil {
+				values = append(values, v0[cur0])
 			}
+			cur0++
+		} else if cmp == 0 {
+			// k0 == k1, prefer k0 (pending writes take precedence)
+			keys = append(keys, k0[cur0])
+			if hasValues && v0 != nil {
+				values = append(values, v0[cur0])
+			}
+			cur0++
+			cur1++
 		} else {
+			// k0 > k1
 			keys = append(keys, k1[cur1])
-			values = append(values, v1[cur1])
+			if hasValues && v1 != nil {
+				values = append(values, v1[cur1])
+			}
 			cur1++
 		}
 	}
 	for cur0 < l0 {
 		keys = append(keys, k0[cur0])
-		values = append(values, v0[cur0])
+		if hasValues && v0 != nil {
+			values = append(values, v0[cur0])
+		}
 		cur0++
 	}
 	for cur1 < l1 {
 		keys = append(keys, k1[cur1])
-		values = append(values, v1[cur1])
+		if hasValues && v1 != nil {
+			values = append(values, v1[cur1])
+		}
 		cur1++
 	}
 	return

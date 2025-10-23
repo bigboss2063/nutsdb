@@ -741,6 +741,167 @@ func TestTx_RangeScan_NotFound(t *testing.T) {
 	})
 }
 
+func TestTx_RangeScanWithPendingWrites(t *testing.T) {
+	bucket := "test_range_scan_pending"
+
+	t.Run("RangeScanEntries with pending writes", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// First commit some data
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("key1"), []byte("db_val1"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key3"), []byte("db_val3"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key5"), []byte("db_val5"), Persistent))
+			require.NoError(t, tx.Commit())
+
+			// Now test with pending writes
+			tx, err = db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("key2"), []byte("pending_val2"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key4"), []byte("pending_val4"), Persistent))
+
+			keys, values, err := tx.RangeScanEntries(bucket, []byte("key1"), []byte("key5"), true, true)
+			require.NoError(t, err)
+			require.Equal(t, 5, len(keys))
+			require.Equal(t, [][]byte{[]byte("key1"), []byte("key2"), []byte("key3"), []byte("key4"), []byte("key5")}, keys)
+			require.Equal(t, [][]byte{[]byte("db_val1"), []byte("pending_val2"), []byte("db_val3"), []byte("pending_val4"), []byte("db_val5")}, values)
+			require.NoError(t, tx.Rollback())
+		})
+	})
+
+	t.Run("RangeScanEntries with deleted keys in pending", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// First commit some data
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("key1"), []byte("db_val1"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key2"), []byte("db_val2"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key3"), []byte("db_val3"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key4"), []byte("db_val4"), Persistent))
+			require.NoError(t, tx.Commit())
+
+			// Now delete key2 in a new transaction and scan
+			tx, err = db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Delete(bucket, []byte("key2")))
+
+			keys, values, err := tx.RangeScanEntries(bucket, []byte("key1"), []byte("key4"), true, true)
+			require.NoError(t, err)
+			require.Equal(t, 3, len(keys))
+			require.Equal(t, [][]byte{[]byte("key1"), []byte("key3"), []byte("key4")}, keys)
+			require.Equal(t, [][]byte{[]byte("db_val1"), []byte("db_val3"), []byte("db_val4")}, values)
+			require.NoError(t, tx.Rollback())
+		})
+	})
+
+	t.Run("RangeScanEntries keys only with deleted keys", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// First commit some data
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("key1"), []byte("db_val1"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key2"), []byte("db_val2"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key3"), []byte("db_val3"), Persistent))
+			require.NoError(t, tx.Commit())
+
+			// Delete key2 and scan for keys only
+			tx, err = db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Delete(bucket, []byte("key2")))
+
+			keys, values, err := tx.RangeScanEntries(bucket, []byte("key1"), []byte("key3"), true, false)
+			require.NoError(t, err)
+			require.Equal(t, 2, len(keys))
+			require.Equal(t, [][]byte{[]byte("key1"), []byte("key3")}, keys)
+			require.Nil(t, values)
+			require.NoError(t, tx.Rollback())
+		})
+	})
+
+	t.Run("RangeScanEntries values only with deleted keys", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// First commit some data
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("key1"), []byte("db_val1"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key2"), []byte("db_val2"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key3"), []byte("db_val3"), Persistent))
+			require.NoError(t, tx.Commit())
+
+			// Delete key2 and scan for values only
+			tx, err = db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Delete(bucket, []byte("key2")))
+
+			keys, values, err := tx.RangeScanEntries(bucket, []byte("key1"), []byte("key3"), false, true)
+			require.NoError(t, err)
+			require.Nil(t, keys)
+			require.Equal(t, 2, len(values))
+			require.Equal(t, [][]byte{[]byte("db_val1"), []byte("db_val3")}, values)
+			require.NoError(t, tx.Rollback())
+		})
+	})
+
+	t.Run("RangeScanEntries with mixed pending and deleted keys", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// First commit some data
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("key1"), []byte("db_val1"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key2"), []byte("db_val2"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key4"), []byte("db_val4"), Persistent))
+			require.NoError(t, tx.Commit())
+
+			// Delete key2, add key3 in pending
+			tx, err = db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Delete(bucket, []byte("key2")))
+			require.NoError(t, tx.Put(bucket, []byte("key3"), []byte("pending_val3"), Persistent))
+
+			keys, values, err := tx.RangeScanEntries(bucket, []byte("key1"), []byte("key4"), true, true)
+			require.NoError(t, err)
+			require.Equal(t, 3, len(keys))
+			require.Equal(t, [][]byte{[]byte("key1"), []byte("key3"), []byte("key4")}, keys)
+			require.Equal(t, [][]byte{[]byte("db_val1"), []byte("pending_val3"), []byte("db_val4")}, values)
+			require.NoError(t, tx.Rollback())
+		})
+	})
+
+	t.Run("RangeScanEntries with all keys deleted in pending", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// First commit some data
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("key1"), []byte("db_val1"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key2"), []byte("db_val2"), Persistent))
+			require.NoError(t, tx.Commit())
+
+			// Delete all keys in range
+			tx, err = db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Delete(bucket, []byte("key1")))
+			require.NoError(t, tx.Delete(bucket, []byte("key2")))
+
+			_, _, err = tx.RangeScanEntries(bucket, []byte("key1"), []byte("key2"), true, true)
+			require.Error(t, err)
+			require.Equal(t, ErrRangeScan, err)
+			require.NoError(t, tx.Rollback())
+		})
+	})
+}
+
 func TestTx_ExpiredDeletion(t *testing.T) {
 	bucket := "bucket"
 
@@ -2188,6 +2349,504 @@ func TestTx_DeleteWithPendingWrites(t *testing.T) {
 			r.NoError(db.View(func(tx *Tx) error {
 				_, err := tx.Get(bucket, key)
 				r.Equal(ErrKeyNotFound, err)
+				return nil
+			}))
+		})
+	})
+}
+
+func TestTx_GetAllKeysValuesWithPendingWrites(t *testing.T) {
+	bucket := "test_bucket"
+
+	t.Run("GetAll with pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add some persistent data
+			txPut(t, db, bucket, []byte("key1"), []byte("value1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key3"), []byte("value3"), Persistent, nil, nil)
+
+			// Test: GetAll with pending writes in same transaction
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Add new key in pending
+				r.NoError(tx.Put(bucket, []byte("key2"), []byte("value2"), Persistent))
+				// Update existing key in pending
+				r.NoError(tx.Put(bucket, []byte("key3"), []byte("value3_updated"), Persistent))
+				// Add another new key
+				r.NoError(tx.Put(bucket, []byte("key4"), []byte("value4"), Persistent))
+
+				// GetAll should return merged and sorted results
+				keys, values, err := tx.GetAll(bucket)
+				r.NoError(err)
+				r.Equal(4, len(keys))
+				r.Equal(4, len(values))
+
+				// Verify sorted order
+				r.Equal([]byte("key1"), keys[0])
+				r.Equal([]byte("key2"), keys[1])
+				r.Equal([]byte("key3"), keys[2])
+				r.Equal([]byte("key4"), keys[3])
+
+				r.Equal([]byte("value1"), values[0])
+				r.Equal([]byte("value2"), values[1])
+				r.Equal([]byte("value3_updated"), values[2])
+				r.Equal([]byte("value4"), values[3])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetKeys with pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data
+			txPut(t, db, bucket, []byte("key1"), []byte("value1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key3"), []byte("value3"), Persistent, nil, nil)
+
+			// Test: GetKeys with pending writes
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, []byte("key2"), []byte("value2"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key4"), []byte("value4"), Persistent))
+
+				keys, err := tx.GetKeys(bucket)
+				r.NoError(err)
+				r.Equal(4, len(keys))
+
+				// Verify sorted order
+				r.Equal([]byte("key1"), keys[0])
+				r.Equal([]byte("key2"), keys[1])
+				r.Equal([]byte("key3"), keys[2])
+				r.Equal([]byte("key4"), keys[3])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetValues with pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data
+			txPut(t, db, bucket, []byte("key1"), []byte("value1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key3"), []byte("value3"), Persistent, nil, nil)
+
+			// Test: GetValues with pending writes
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, []byte("key2"), []byte("value2"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key4"), []byte("value4"), Persistent))
+
+				values, err := tx.GetValues(bucket)
+				r.NoError(err)
+				r.Equal(4, len(values))
+
+				// Values should be in order of sorted keys
+				r.Equal([]byte("value1"), values[0])
+				r.Equal([]byte("value2"), values[1])
+				r.Equal([]byte("value3"), values[2])
+				r.Equal([]byte("value4"), values[3])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetAll only pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Test: GetAll with only pending writes (no persistent data)
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, []byte("key3"), []byte("value3"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key1"), []byte("value1"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key2"), []byte("value2"), Persistent))
+
+				keys, values, err := tx.GetAll(bucket)
+				r.NoError(err)
+				r.Equal(3, len(keys))
+				r.Equal(3, len(values))
+
+				// Should be sorted
+				r.Equal([]byte("key1"), keys[0])
+				r.Equal([]byte("key2"), keys[1])
+				r.Equal([]byte("key3"), keys[2])
+
+				r.Equal([]byte("value1"), values[0])
+				r.Equal([]byte("value2"), values[1])
+				r.Equal([]byte("value3"), values[2])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetKeys only pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Test: GetKeys with only pending writes
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, []byte("key3"), []byte("value3"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key1"), []byte("value1"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key2"), []byte("value2"), Persistent))
+
+				keys, err := tx.GetKeys(bucket)
+				r.NoError(err)
+				r.Equal(3, len(keys))
+
+				// Should be sorted
+				r.Equal([]byte("key1"), keys[0])
+				r.Equal([]byte("key2"), keys[1])
+				r.Equal([]byte("key3"), keys[2])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetAll with empty pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data only
+			txPut(t, db, bucket, []byte("key1"), []byte("value1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key2"), []byte("value2"), Persistent, nil, nil)
+
+			// Test: GetAll without pending writes
+			r.NoError(db.View(func(tx *Tx) error {
+				keys, values, err := tx.GetAll(bucket)
+				r.NoError(err)
+				r.Equal(2, len(keys))
+				r.Equal(2, len(values))
+
+				r.Equal([]byte("key1"), keys[0])
+				r.Equal([]byte("key2"), keys[1])
+
+				r.Equal([]byte("value1"), values[0])
+				r.Equal([]byte("value2"), values[1])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetAll with duplicate keys in pending", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data
+			txPut(t, db, bucket, []byte("key1"), []byte("old_value1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key2"), []byte("old_value2"), Persistent, nil, nil)
+
+			// Test: GetAll when pending has updates to existing keys
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, []byte("key1"), []byte("new_value1"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key2"), []byte("new_value2"), Persistent))
+
+				keys, values, err := tx.GetAll(bucket)
+				r.NoError(err)
+				r.Equal(2, len(keys))
+				r.Equal(2, len(values))
+
+				// Should get updated values from pending
+				r.Equal([]byte("key1"), keys[0])
+				r.Equal([]byte("key2"), keys[1])
+
+				r.Equal([]byte("new_value1"), values[0])
+				r.Equal([]byte("new_value2"), values[1])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetKeys with unsorted pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Test: GetKeys should sort pending writes correctly
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Add in reverse order
+				r.NoError(tx.Put(bucket, []byte("key5"), []byte("value5"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key3"), []byte("value3"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key1"), []byte("value1"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key4"), []byte("value4"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key2"), []byte("value2"), Persistent))
+
+				keys, err := tx.GetKeys(bucket)
+				r.NoError(err)
+				r.Equal(5, len(keys))
+
+				// Should be sorted despite insertion order
+				for i := 0; i < 5; i++ {
+					expected := []byte(fmt.Sprintf("key%d", i+1))
+					r.Equal(expected, keys[i])
+				}
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetAll with deleted keys in pending", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data
+			txPut(t, db, bucket, []byte("key1"), []byte("value1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key2"), []byte("value2"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key3"), []byte("value3"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Delete one key in transaction
+				r.NoError(tx.Delete(bucket, []byte("key2")))
+
+				keys, values, err := tx.GetAll(bucket)
+				r.NoError(err)
+
+				// Should only get 2 entries (key2 is deleted)
+				r.Equal(2, len(keys))
+				r.Equal(2, len(values))
+				r.Equal([]byte("key1"), keys[0])
+				r.Equal([]byte("key3"), keys[1])
+				r.Equal([]byte("value1"), values[0])
+				r.Equal([]byte("value3"), values[1])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetKeys with deleted keys in pending", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			txPut(t, db, bucket, []byte("a"), []byte("v1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("b"), []byte("v2"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("c"), []byte("v3"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Delete(bucket, []byte("b")))
+
+				keys, err := tx.GetKeys(bucket)
+				r.NoError(err)
+				r.Equal(2, len(keys))
+				r.Equal([]byte("a"), keys[0])
+				r.Equal([]byte("c"), keys[1])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("GetValues with deleted keys in pending", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			txPut(t, db, bucket, []byte("x"), []byte("vx"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("y"), []byte("vy"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("z"), []byte("vz"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Delete(bucket, []byte("y")))
+
+				values, err := tx.GetValues(bucket)
+				r.NoError(err)
+				r.Equal(2, len(values))
+				r.Equal([]byte("vx"), values[0])
+				r.Equal([]byte("vz"), values[1])
+
+				return nil
+			}))
+		})
+	})
+}
+
+func TestTx_PrefixScanWithPendingWrites(t *testing.T) {
+	bucket := "test_prefix_bucket"
+
+	t.Run("PrefixScan with pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data
+			txPut(t, db, bucket, []byte("user:001"), []byte("alice"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("user:003"), []byte("charlie"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("item:001"), []byte("book"), Persistent, nil, nil)
+
+			// Test: PrefixScan with pending writes
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Add new keys with same prefix
+				r.NoError(tx.Put(bucket, []byte("user:002"), []byte("bob"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("user:004"), []byte("david"), Persistent))
+				// Update existing key
+				r.NoError(tx.Put(bucket, []byte("user:003"), []byte("charlie_updated"), Persistent))
+
+				// PrefixScan should return merged and sorted results
+				values, err := tx.PrefixScan(bucket, []byte("user:"), 0, 10)
+				r.NoError(err)
+				r.Equal(4, len(values))
+
+				// Verify order and values
+				r.Equal([]byte("alice"), values[0])
+				r.Equal([]byte("bob"), values[1])
+				r.Equal([]byte("charlie_updated"), values[2])
+				r.Equal([]byte("david"), values[3])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("PrefixScanEntries with pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data
+			txPut(t, db, bucket, []byte("app:001:name"), []byte("app1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("app:003:name"), []byte("app3"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Add pending writes
+				r.NoError(tx.Put(bucket, []byte("app:002:name"), []byte("app2"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("app:004:name"), []byte("app4"), Persistent))
+				// Update existing
+				r.NoError(tx.Put(bucket, []byte("app:003:name"), []byte("app3_new"), Persistent))
+
+				keys, values, err := tx.PrefixScanEntries(bucket, []byte("app:"), "", 0, 10, true, true)
+				r.NoError(err)
+				r.Equal(4, len(keys))
+				r.Equal(4, len(values))
+
+				// Verify sorted order
+				r.Equal([]byte("app:001:name"), keys[0])
+				r.Equal([]byte("app:002:name"), keys[1])
+				r.Equal([]byte("app:003:name"), keys[2])
+				r.Equal([]byte("app:004:name"), keys[3])
+
+				r.Equal([]byte("app1"), values[0])
+				r.Equal([]byte("app2"), values[1])
+				r.Equal([]byte("app3_new"), values[2])
+				r.Equal([]byte("app4"), values[3])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("PrefixScan with offset and limit", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data
+			txPut(t, db, bucket, []byte("key:001"), []byte("v1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key:003"), []byte("v3"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key:005"), []byte("v5"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Add pending writes
+				r.NoError(tx.Put(bucket, []byte("key:002"), []byte("v2"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key:004"), []byte("v4"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("key:006"), []byte("v6"), Persistent))
+
+				// Test with offset and limit
+				values, err := tx.PrefixScan(bucket, []byte("key:"), 2, 3)
+				r.NoError(err)
+				r.Equal(3, len(values))
+
+				// Should get v3, v4, v5 (offset 2, limit 3)
+				r.Equal([]byte("v3"), values[0])
+				r.Equal([]byte("v4"), values[1])
+				r.Equal([]byte("v5"), values[2])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("PrefixScan only pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Only add pending writes
+				r.NoError(tx.Put(bucket, []byte("prefix:001"), []byte("p1"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("prefix:002"), []byte("p2"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("prefix:003"), []byte("p3"), Persistent))
+
+				values, err := tx.PrefixScan(bucket, []byte("prefix:"), 0, 10)
+				r.NoError(err)
+				r.Equal(3, len(values))
+
+				r.Equal([]byte("p1"), values[0])
+				r.Equal([]byte("p2"), values[1])
+				r.Equal([]byte("p3"), values[2])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("PrefixScan with deleted keys in pending", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data
+			txPut(t, db, bucket, []byte("del:001"), []byte("d1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("del:002"), []byte("d2"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("del:003"), []byte("d3"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Delete one key in transaction
+				r.NoError(tx.Delete(bucket, []byte("del:002")))
+
+				values, err := tx.PrefixScan(bucket, []byte("del:"), 0, 10)
+				r.NoError(err)
+
+				// Should only get 2 values (del:002 is deleted)
+				r.Equal(2, len(values))
+				r.Equal([]byte("d1"), values[0])
+				r.Equal([]byte("d3"), values[1])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("PrefixScan with no matching prefix", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			txPut(t, db, bucket, []byte("abc:001"), []byte("v1"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, []byte("abc:002"), []byte("v2"), Persistent))
+
+				// Scan with non-matching prefix
+				values, err := tx.PrefixScan(bucket, []byte("xyz:"), 0, 10)
+				r.Error(err)
+				r.Equal(ErrPrefixScan, err)
+				r.Nil(values)
+
 				return nil
 			}))
 		})
