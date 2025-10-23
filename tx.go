@@ -819,7 +819,7 @@ func (tx *Tx) getBucketAndItsStatus(ds Ds, name BucketName) (BucketStatus, *Buck
 }
 
 // findEntryStatus finds the latest status for the certain Entry in Tx
-func (tx *Tx) findEntryAndItsStatus(ds Ds, bucket BucketName, key string) (EntryStatus, *Entry) {
+func (tx *Tx) findEntryAndItsStatus(_ Ds, bucket BucketName, key string) (EntryStatus, *Entry) {
 	if tx.pendingWrites.size == 0 {
 		return NotFoundEntry, nil
 	}

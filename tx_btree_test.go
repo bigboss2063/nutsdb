@@ -2039,3 +2039,157 @@ func TestTx_NewTTLReturnError(t *testing.T) {
 		r.Equal(expectErr, err)
 	})
 }
+
+func TestTx_DeleteWithPendingWrites(t *testing.T) {
+	t.Run("delete key added in same transaction", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			bucket := "test_bucket"
+			key := []byte("new_key")
+			value := []byte("new_value")
+
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Test: Put and Delete in same transaction
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Put a new key in this transaction
+				r.NoError(tx.Put(bucket, key, value, Persistent))
+
+				// Verify the key exists in pending writes
+				val, err := tx.Get(bucket, key)
+				r.NoError(err)
+				r.Equal(value, val)
+
+				// Delete the key that was just added in this transaction
+				err = tx.Delete(bucket, key)
+				r.NoError(err)
+
+				// Verify the key is now deleted in pending writes
+				_, err = tx.Get(bucket, key)
+				r.Equal(ErrKeyNotFound, err)
+
+				return nil
+			}))
+
+			// Verify the key doesn't exist after transaction commits
+			r.NoError(db.View(func(tx *Tx) error {
+				_, err := tx.Get(bucket, key)
+				r.Equal(ErrKeyNotFound, err)
+				return nil
+			}))
+		})
+	})
+
+	t.Run("delete already deleted key in same transaction", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			bucket := "test_bucket"
+			key := []byte("existing_key")
+			value := []byte("existing_value")
+
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+			txPut(t, db, bucket, key, value, Persistent, nil, nil)
+
+			// Test: Delete twice in same transaction
+			r.NoError(db.Update(func(tx *Tx) error {
+				// First delete
+				r.NoError(tx.Delete(bucket, key))
+
+				// Try to delete again - should fail
+				err := tx.Delete(bucket, key)
+				r.Equal(ErrKeyNotFound, err)
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("delete key updated in same transaction", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			bucket := "test_bucket"
+			key := []byte("update_key")
+			value1 := []byte("value1")
+			value2 := []byte("value2")
+
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+			txPut(t, db, bucket, key, value1, Persistent, nil, nil)
+
+			// Test: Update and then Delete in same transaction
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Update the key
+				r.NoError(tx.Put(bucket, key, value2, Persistent))
+
+				// Verify update is visible
+				val, err := tx.Get(bucket, key)
+				r.NoError(err)
+				r.Equal(value2, val)
+
+				// Delete the updated key
+				err = tx.Delete(bucket, key)
+				r.NoError(err)
+
+				// Verify deletion is visible
+				_, err = tx.Get(bucket, key)
+				r.Equal(ErrKeyNotFound, err)
+
+				return nil
+			}))
+
+			// Verify the key is deleted after commit
+			r.NoError(db.View(func(tx *Tx) error {
+				_, err := tx.Get(bucket, key)
+				r.Equal(ErrKeyNotFound, err)
+				return nil
+			}))
+		})
+	})
+
+	t.Run("delete non-existent key", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			bucket := "test_bucket"
+			key := []byte("non_existent_key")
+
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Test: Delete non-existent key should fail
+			err := db.Update(func(tx *Tx) error {
+				return tx.Delete(bucket, key)
+			})
+			r.Equal(ErrKeyNotFound, err)
+		})
+	})
+
+	t.Run("delete persisted key", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			bucket := "test_bucket"
+			key := []byte("persisted_key")
+			value := []byte("persisted_value")
+
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+			txPut(t, db, bucket, key, value, Persistent, nil, nil)
+
+			// Verify key exists
+			r.NoError(db.View(func(tx *Tx) error {
+				val, err := tx.Get(bucket, key)
+				r.NoError(err)
+				r.Equal(value, val)
+				return nil
+			}))
+
+			// Delete the persisted key
+			r.NoError(db.Update(func(tx *Tx) error {
+				return tx.Delete(bucket, key)
+			}))
+
+			// Verify key is deleted
+			r.NoError(db.View(func(tx *Tx) error {
+				_, err := tx.Get(bucket, key)
+				r.Equal(ErrKeyNotFound, err)
+				return nil
+			}))
+		})
+	})
+}

@@ -99,7 +99,7 @@ func (tx *Tx) get(bucket string, key []byte) (value []byte, err error) {
 	bucketId := b.Id
 
 	status, entry := tx.findEntryAndItsStatus(DataStructureBTree, bucket, string(key))
-	if status != NotFoundEntry && entry != nil {
+	if status != NotFoundEntry {
 		if status == EntryDeleted {
 			return nil, ErrKeyNotFound
 		} else {
@@ -279,8 +279,8 @@ func (tx *Tx) Has(bucket string, key []byte) (exists bool, err error) {
 	}
 	bucketId := b.Id
 
-	status, entry := tx.findEntryAndItsStatus(DataStructureBTree, bucket, string(key))
-	if status != NotFoundEntry && entry != nil {
+	status, _ = tx.findEntryAndItsStatus(DataStructureBTree, bucket, string(key))
+	if status != NotFoundEntry {
 		if status == EntryDeleted {
 			return false, ErrKeyNotFound
 		} else {
@@ -431,18 +431,29 @@ func (tx *Tx) Delete(bucket string, key []byte) error {
 	if err := tx.checkTxIsClosed(); err != nil {
 		return err
 	}
-	b, err := tx.db.bm.GetBucket(DataStructureBTree, bucket)
-	if err != nil {
-		return err
+	status, b := tx.getBucketAndItsStatus(DataStructureBTree, bucket)
+	if isBucketNotFoundStatus(status) {
+		return ErrNotFoundBucket
 	}
 	bucketId := b.Id
 
-	if idx, ok := tx.db.Index.bTree.exist(bucketId); ok {
-		if _, found := idx.Find(key); !found {
+	// Check pending writes first for transaction visibility
+	status, _ = tx.findEntryAndItsStatus(DataStructureBTree, bucket, string(key))
+	if status != NotFoundEntry {
+		if status == EntryDeleted {
+			// Key already deleted in this transaction
 			return ErrKeyNotFound
 		}
+		// Key exists in pending writes (EntryUpdated), allow deletion
 	} else {
-		return ErrKeyNotFound
+		// Key not in pending, check persistent storage
+		if idx, ok := tx.db.Index.bTree.exist(bucketId); ok {
+			if _, found := idx.Find(key); !found {
+				return ErrKeyNotFound
+			}
+		} else {
+			return ErrKeyNotFound
+		}
 	}
 
 	return tx.put(bucket, key, nil, Persistent, DataDeleteFlag, uint64(time.Now().Unix()), DataStructureBTree)
