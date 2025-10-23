@@ -153,51 +153,59 @@ func (tx *Tx) getMaxOrMinKey(bucket string, isMax bool) ([]byte, error) {
 	}
 	bucketId := b.Id
 
-	var (
-		key           []byte = nil
-		actuallyFound        = false
-	)
+	// Candidate from pending writes
+	pendingKey, pendingFound := tx.pendingWrites.MaxOrMinKey(bucket, isMax)
 
-	key, actuallyFound = tx.pendingWrites.MaxOrMinKey(bucket, isMax)
+	// Candidate from persistent index (skip expired and keys deleted in pending)
+	var indexKey []byte
 
-	if idx, ok := tx.db.Index.bTree.exist(bucketId); ok {
-		var (
-			item  *data.Item[data.Record]
-			found bool
-		)
-
-		if isMax {
-			item, found = idx.Max()
-		} else {
-			item, found = idx.Min()
-		}
-
-		if !found {
-			if actuallyFound {
-				return key, nil
+	indexFound := false
+	it := NewIterator(tx, bucket, IteratorOptions{Reverse: isMax})
+	if it != nil {
+		defer it.Release()
+		for it.Valid() {
+			item := it.Item()
+			if item == nil {
+				break
 			}
-			return nil, ErrKeyNotFound
-		} else {
-			actuallyFound = found
-		}
-
-		if item.Record.IsExpired() {
-			tx.putDeleteLog(bucketId, item.Key, nil, Persistent, DataDeleteFlag, uint64(time.Now().Unix()), DataStructureBTree)
-			if actuallyFound {
-				return key, nil
+			// Skip expired items
+			if item.Record.IsExpired() {
+				tx.putDeleteLog(bucketId, item.Key, nil, Persistent, DataDeleteFlag, uint64(time.Now().Unix()), DataStructureBTree)
+				it.Next()
+				continue
 			}
-			return nil, ErrKeyNotFound
-		}
-		if isMax {
-			key = compareAndReturn(key, item.Key, 1)
-		} else {
-			key = compareAndReturn(key, item.Key, -1)
+
+			// Skip keys that are deleted in pending writes
+			if st, _ := tx.findEntryAndItsStatus(DataStructureBTree, bucket, string(item.Key)); st == EntryDeleted {
+				it.Next()
+				continue
+			}
+
+			indexKey = it.Key()
+			indexFound = true
+
+			break
 		}
 	}
-	if actuallyFound {
-		return key, nil
+
+	// Compare candidates
+	if pendingFound && indexFound {
+		if isMax {
+			return compareAndReturn(indexKey, pendingKey, 1), nil
+		}
+		return compareAndReturn(indexKey, pendingKey, -1), nil
 	}
+
+	if pendingFound {
+		return pendingKey, nil
+	}
+
+	if indexFound {
+		return indexKey, nil
+	}
+
 	return nil, ErrKeyNotFound
+
 }
 
 // GetAll returns all keys and values in the given bucket.
@@ -406,9 +414,10 @@ func (tx *Tx) PrefixScanEntries(bucket string, prefix []byte, reg string, offset
 	if err := tx.checkTxIsClosed(); err != nil {
 		return nil, nil, err
 	}
-	b, err := tx.db.bm.GetBucket(DataStructureBTree, bucket)
-	if err != nil {
-		return nil, nil, err
+
+	status, b := tx.getBucketAndItsStatus(DataStructureBTree, bucket)
+	if isBucketNotFoundStatus(status) {
+		return nil, nil, ErrNotFoundBucket
 	}
 	bucketId := b.Id
 
@@ -428,7 +437,10 @@ func (tx *Tx) PrefixScanEntries(bucket string, prefix []byte, reg string, offset
 			records = idx.PrefixScan(prefix, 0, -1)
 		} else {
 			// For prefix search scan with regex, get all matching records (no limit yet)
-			records = idx.PrefixSearchScan(prefix, reg, 0, -1)
+			records, err = idx.PrefixSearchScan(prefix, reg, 0, -1)
+			if err != nil {
+				return nil, nil, xerr(err)
+			}
 		}
 		// Need both keys and values for merging, even if only one is requested
 		// Create a filter for keys with the given prefix that are deleted in pending writes
@@ -440,10 +452,11 @@ func (tx *Tx) PrefixScanEntries(bucket string, prefix []byte, reg string, offset
 		}
 	}
 
-	// Get pending writes with the same prefix
-	// Note: regex filtering is not applied to pending writes yet
-	// TODO: support regex for pending writes if needed
-	pendingKeys, pendingValues := tx.pendingWrites.prefixScanEntries(bucket, prefix, true, true)
+	// Get pending writes with the same prefix and apply regex filter
+	pendingKeys, pendingValues, err := tx.pendingWrites.prefixScanEntries(bucket, prefix, reg, true, true)
+	if err != nil {
+		return nil, nil, xerr(err)
+	}
 
 	// Merge pending writes with database data
 	if len(pendingKeys) > 0 || len(pendingValues) > 0 {
@@ -508,6 +521,7 @@ func (tx *Tx) Delete(bucket string, key []byte) error {
 	if err := tx.checkTxIsClosed(); err != nil {
 		return err
 	}
+
 	status, b := tx.getBucketAndItsStatus(DataStructureBTree, bucket)
 	if isBucketNotFoundStatus(status) {
 		return ErrNotFoundBucket
@@ -540,9 +554,13 @@ func (tx *Tx) Delete(bucket string, key []byte) error {
 // whose keys have been deleted in pending writes. This is used to efficiently
 // skip deleted keys during data retrieval.
 //
+// Parameters:
+//   - bucket: the bucket name to check for deleted keys
+//   - prefixHint: optional prefix filter (nil means all deleted keys in the bucket)
+//
 // Returns a filter function that returns true if the record should be skipped.
-func (tx *Tx) filterRecordsByPendingDeletes(bucket string, prefixFilter []byte) func(*data.Record) bool {
-	deletedKeys := tx.pendingWrites.getDeletedKeys(bucket, prefixFilter)
+func (tx *Tx) filterRecordsByPendingDeletes(bucket string, prefixHint []byte) func(*data.Record) bool {
+	deletedKeys := tx.pendingWrites.getDeletedKeys(bucket, prefixHint)
 
 	// If no keys are deleted, return a no-op filter
 	if len(deletedKeys) == 0 {
@@ -616,11 +634,13 @@ func (tx *Tx) tryGet(bucket string, key []byte, solveRecord func(record *data.Re
 	if err := tx.checkTxIsClosed(); err != nil {
 		return err
 	}
+
 	status, b := tx.getBucketAndItsStatus(DataStructureBTree, bucket)
 	if isBucketNotFoundStatus(status) {
 		return ErrNotFoundBucket
 	}
 	bucketId := b.Id
+
 	var (
 		record *data.Record = nil
 		found  bool

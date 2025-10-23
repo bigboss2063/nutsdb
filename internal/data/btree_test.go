@@ -99,7 +99,7 @@ func TestBTree_PrefixSearchScan(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, key, record.Key)
 
-			records := btree.PrefixSearchScan([]byte("nutsdb-"),
+			records, _ := btree.PrefixSearchScan([]byte("nutsdb-"),
 				"[a-z\\d]+(\\.[a-z\\d]+)*@([\\da-z](-[\\da-z])?)+(\\.{1,2}[a-z]+)+$", 0, 1)
 			require.Equal(t, key, records[0].Key)
 		})
@@ -118,7 +118,7 @@ func TestBTree_PrefixSearchScan(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, key, record.Key)
 
-			records := btree.PrefixSearchScan([]byte("nutsdb-"),
+			records, _ := btree.PrefixSearchScan([]byte("nutsdb-"),
 				"[a-z\\d]+(\\.[a-z\\d]+)*@([\\da-z](-[\\da-z])?)+(\\.{1,2}[a-z]+)+$", 0, 1)
 			require.Len(t, records, 0)
 		})

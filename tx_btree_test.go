@@ -900,6 +900,55 @@ func TestTx_RangeScanWithPendingWrites(t *testing.T) {
 			require.NoError(t, tx.Rollback())
 		})
 	})
+
+	t.Run("RangeScanEntries with pending update overriding DB value", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Commit base data
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("key2"), []byte("db_val2"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("key3"), []byte("db_val3"), Persistent))
+			require.NoError(t, tx.Commit())
+
+			// Update one key in pending
+			tx, err = db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("key2"), []byte("pending_val2_updated"), Persistent))
+
+			keys, values, err := tx.RangeScanEntries(bucket, []byte("key2"), []byte("key3"), true, true)
+			require.NoError(t, err)
+			require.Equal(t, [][]byte{[]byte("key2"), []byte("key3")}, keys)
+			require.Equal(t, [][]byte{[]byte("pending_val2_updated"), []byte("db_val3")}, values)
+			require.NoError(t, tx.Rollback())
+		})
+	})
+
+	t.Run("RangeScanEntries with only pending keys in range", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Commit non-overlapping data
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("a"), []byte("va"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("z"), []byte("vz"), Persistent))
+			require.NoError(t, tx.Commit())
+
+			// Pending only keys within the scan range
+			tx, err = db.Begin(true)
+			require.NoError(t, err)
+			require.NoError(t, tx.Put(bucket, []byte("m1"), []byte("vm1"), Persistent))
+			require.NoError(t, tx.Put(bucket, []byte("m2"), []byte("vm2"), Persistent))
+
+			keys, values, err := tx.RangeScanEntries(bucket, []byte("m1"), []byte("m3"), true, true)
+			require.NoError(t, err)
+			require.Equal(t, [][]byte{[]byte("m1"), []byte("m2")}, keys)
+			require.Equal(t, [][]byte{[]byte("vm1"), []byte("vm2")}, values)
+			require.NoError(t, tx.Rollback())
+		})
+	})
 }
 
 func TestTx_ExpiredDeletion(t *testing.T) {
@@ -1114,6 +1163,45 @@ func TestTx_GetMaxOrMinKey(t *testing.T) {
 			txGetMaxOrMinKey(t, db, bucket, false, keyb, nil)
 			<-time.After(2000 * time.Millisecond)
 			txGetMaxOrMinKey(t, db, bucket, true, keyb, nil)
+		})
+	})
+
+	t.Run("pending writes affect min/max within same tx", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Base data
+			txPut(t, db, bucket, []byte("b"), []byte("vb"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("d"), []byte("vd"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Pending new min and max
+				r.NoError(tx.Put(bucket, []byte("a"), []byte("va"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("e"), []byte("ve"), Persistent))
+
+				min, err := tx.GetMinKey(bucket)
+				r.NoError(err)
+				r.Equal([]byte("a"), min)
+
+				max, err := tx.GetMaxKey(bucket)
+				r.NoError(err)
+				r.Equal([]byte("e"), max)
+
+				// Delete persistent min; min should still be 'a'
+				r.NoError(tx.Delete(bucket, []byte("b")))
+				min, err = tx.GetMinKey(bucket)
+				r.NoError(err)
+				r.Equal([]byte("a"), min)
+
+				// Delete pending 'a'; next min should be 'd'
+				r.NoError(tx.Delete(bucket, []byte("a")))
+				min, err = tx.GetMinKey(bucket)
+				r.NoError(err)
+				r.Equal([]byte("d"), min)
+
+				return nil
+			}))
 		})
 	})
 }
@@ -1373,6 +1461,41 @@ func TestTx_ValueLen(t *testing.T) {
 			txValueLen(t, db, bucket, testutils.GetTestBytes(1), 0, ErrKeyNotFound)
 		})
 	})
+
+	t.Run("pending update length in same transaction", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			key := testutils.GetTestBytes(10)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+			txPut(t, db, bucket, key, []byte("small"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Update value in pending
+				r.NoError(tx.Put(bucket, key, []byte("much_longer_value"), Persistent))
+				// ValueLen should reflect pending value
+				n, err := tx.ValueLen(bucket, key)
+				r.NoError(err)
+				r.Equal(len([]byte("much_longer_value")), n)
+				return nil
+			}))
+		})
+	})
+
+	t.Run("pending insert length in same transaction", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			key := testutils.GetTestBytes(11)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, key, []byte("abc123"), Persistent))
+				n, err := tx.ValueLen(bucket, key)
+				r.NoError(err)
+				r.Equal(6, n)
+				return nil
+			}))
+		})
+	})
 }
 
 func TestTx_GetSet(t *testing.T) {
@@ -1463,6 +1586,43 @@ func TestTx_MSetMGet(t *testing.T) {
 			}, [][]byte{
 				testutils.GetTestBytes(1), testutils.GetTestBytes(3),
 			}, nil, nil)
+		})
+	})
+
+	t.Run("MGet with pending insert and update in same tx", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Persist some data
+			txPut(t, db, bucket, []byte("k1"), []byte("v1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("k2"), []byte("v2"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Pending update and insert
+				r.NoError(tx.Put(bucket, []byte("k1"), []byte("v1_new"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("k3"), []byte("v3"), Persistent))
+
+				values, err := tx.MGet(bucket, []byte("k1"), []byte("k2"), []byte("k3"))
+				r.NoError(err)
+				r.Equal([][]byte{[]byte("v1_new"), []byte("v2"), []byte("v3")}, values)
+				return nil
+			}))
+		})
+	})
+
+	t.Run("MGet returns error when any key missing", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+			txPut(t, db, bucket, []byte("x1"), []byte("vx1"), Persistent, nil, nil)
+
+			err := db.Update(func(tx *Tx) error {
+				_, err := tx.MGet(bucket, []byte("x1"), []byte("x-missing"))
+				return err
+			})
+			r.Error(err)
+			r.Equal(ErrKeyNotFound, err)
 		})
 	})
 }
@@ -1696,6 +1856,39 @@ func TestTx_Has(t *testing.T) {
 			txPut(t, db, bucket, testutils.GetTestBytes(1), val, 1, nil, nil)
 			time.Sleep(3 * time.Second)
 			txHas(t, db, bucket, testutils.GetTestBytes(1), false, nil)
+		})
+	})
+
+	t.Run("Has reflects pending delete within same tx", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			key := testutils.GetTestBytes(2)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+			txPut(t, db, bucket, key, val, Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Delete(bucket, key))
+				exists, err := tx.Has(bucket, key)
+				r.False(exists)
+				r.Equal(ErrKeyNotFound, err)
+				return nil
+			}))
+		})
+	})
+
+	t.Run("Has reflects pending insert within same tx", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			key := testutils.GetTestBytes(3)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, key, []byte("x"), Persistent))
+				exists, err := tx.Has(bucket, key)
+				r.NoError(err)
+				r.True(exists)
+				return nil
+			}))
 		})
 	})
 }
@@ -2847,6 +3040,168 @@ func TestTx_PrefixScanWithPendingWrites(t *testing.T) {
 				r.Equal(ErrPrefixScan, err)
 				r.Nil(values)
 
+				return nil
+			}))
+		})
+	})
+}
+
+func TestTx_PrefixSearchScanWithPendingWrites(t *testing.T) {
+	bucket := "test_prefix_regex_bucket"
+
+	t.Run("PrefixSearchScan with regex and pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data with mixed patterns
+			txPut(t, db, bucket, []byte("user:001:alice"), []byte("alice"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("user:003:charlie"), []byte("charlie"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("user:005:999"), []byte("999"), Persistent, nil, nil)
+
+			// Test: PrefixSearchScan with regex and pending writes
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Add new keys with same prefix, some match regex, some don't
+				r.NoError(tx.Put(bucket, []byte("user:002:bob"), []byte("bob"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("user:004:david"), []byte("david"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("user:006:123"), []byte("123"), Persistent))
+
+				// Regex matches only lowercase letters (filters out numeric values)
+				values, err := tx.PrefixSearchScan(bucket, []byte("user:"), "[a-z]+", 0, 10)
+				r.NoError(err)
+
+				// Should only get alphabetic names, filtering out "999" and "123"
+				r.Equal(4, len(values))
+				r.Equal([]byte("alice"), values[0])
+				r.Equal([]byte("bob"), values[1])
+				r.Equal([]byte("charlie"), values[2])
+				r.Equal([]byte("david"), values[3])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("PrefixSearchScanEntries with regex and pending deletes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data
+			txPut(t, db, bucket, []byte("key:001:alpha"), []byte("v1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key:002:beta"), []byte("v2"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key:003:gamma"), []byte("v3"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("key:004:delta"), []byte("v4"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Delete one key and add a new one
+				r.NoError(tx.Delete(bucket, []byte("key:002:beta")))
+				r.NoError(tx.Put(bucket, []byte("key:005:epsilon"), []byte("v5"), Persistent))
+
+				// Regex: keys ending with "a" (alpha, gamma, delta, epsilon - not beta)
+				keys, values, err := tx.PrefixScanEntries(bucket, []byte("key:"), ".*a$", 0, 10, true, true)
+				r.NoError(err)
+
+				// Should get alpha, gamma, delta (beta deleted, epsilon doesn't end with 'a')
+				r.Equal(3, len(keys))
+				r.Equal([]byte("key:001:alpha"), keys[0])
+				r.Equal([]byte("key:003:gamma"), keys[1])
+				r.Equal([]byte("key:004:delta"), keys[2])
+
+				r.Equal([]byte("v1"), values[0])
+				r.Equal([]byte("v3"), values[1])
+				r.Equal([]byte("v4"), values[2])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("PrefixSearchScan with regex matching only pending writes", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			// Add persistent data that won't match the regex
+			txPut(t, db, bucket, []byte("prefix:111"), []byte("n1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("prefix:222"), []byte("n2"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				// Add pending data that will match the regex
+				r.NoError(tx.Put(bucket, []byte("prefix:aaa"), []byte("a1"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("prefix:bbb"), []byte("a2"), Persistent))
+
+				// Regex: only lowercase letters after prefix
+				values, err := tx.PrefixSearchScan(bucket, []byte("prefix:"), "[a-z]+", 0, 10)
+				r.NoError(err)
+
+				// Should only get the pending writes with alphabetic suffixes
+				r.Equal(2, len(values))
+				r.Equal([]byte("a1"), values[0])
+				r.Equal([]byte("a2"), values[1])
+
+				return nil
+			}))
+		})
+	})
+
+	t.Run("PrefixSearchScan with invalid regex", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+			txPut(t, db, bucket, []byte("item:001"), []byte("i1"), Persistent, nil, nil)
+
+			// Invalid regex should cause an error when compiling
+			err := db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, []byte("item:002"), []byte("i2"), Persistent))
+
+				// Invalid regex - should cause a panic/error
+				values, err := tx.PrefixSearchScan(bucket, []byte("item:"), "[invalid(", 0, 10)
+				r.Equal(0, len(values))
+				return err
+			})
+
+			// Expect an error due to invalid regex
+			r.Error(err)
+		})
+	})
+
+	t.Run("PrefixSearchScanEntries with empty regex (same as PrefixScan)", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+			txPut(t, db, bucket, []byte("app:001"), []byte("app1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("app:003"), []byte("app3"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, []byte("app:002"), []byte("app2"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("app:003"), []byte("app3_new"), Persistent))
+
+				keys, values, err := tx.PrefixScanEntries(bucket, []byte("app:"), "", 0, 10, true, false)
+				r.NoError(err)
+				r.Equal([][]byte{[]byte("app:001"), []byte("app:002"), []byte("app:003")}, keys)
+				r.Nil(values)
+				return nil
+			}))
+		})
+	})
+
+	t.Run("PrefixScanEntries includeValues only with pending updates", func(t *testing.T) {
+		runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+			r := require.New(t)
+			txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+			txPut(t, db, bucket, []byte("app:001"), []byte("app1"), Persistent, nil, nil)
+			txPut(t, db, bucket, []byte("app:003"), []byte("app3"), Persistent, nil, nil)
+
+			r.NoError(db.Update(func(tx *Tx) error {
+				r.NoError(tx.Put(bucket, []byte("app:002"), []byte("app2"), Persistent))
+				r.NoError(tx.Put(bucket, []byte("app:003"), []byte("app3_new"), Persistent))
+
+				keys, values, err := tx.PrefixScanEntries(bucket, []byte("app:"), "", 0, 10, false, true)
+				r.NoError(err)
+				r.Nil(keys)
+				r.Equal([][]byte{[]byte("app1"), []byte("app2"), []byte("app3_new")}, values)
 				return nil
 			}))
 		})

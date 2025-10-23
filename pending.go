@@ -2,7 +2,10 @@ package nutsdb
 
 import (
 	"bytes"
+	"regexp"
 	"sort"
+
+	"github.com/nutsdb/nutsdb/internal/utils"
 )
 
 // EntryStatus represents the Entry status in the current Tx
@@ -127,8 +130,12 @@ func (pending *pendingEntryList) getDataByRange(
 	if !ok {
 		return nil, nil
 	}
-	keys = make([][]byte, 0)
-	values = make([][]byte, 0)
+
+	// Pre-allocate with estimated capacity
+	estimatedSize := len(mp)
+	keys = make([][]byte, 0, estimatedSize)
+	values = make([][]byte, 0, estimatedSize)
+
 	for _, v := range mp {
 		// Skip deleted entries
 		if v.Meta != nil && v.Meta.Flag == DataDeleteFlag {
@@ -195,11 +202,12 @@ func (pending *pendingEntryList) getAllOrKeysOrValues(bucket string, includeKeys
 }
 
 // prefixScanEntries returns keys and/or values with given prefix from pending writes
-// It returns active (non-deleted) entries and deleted keys separately
-func (pending *pendingEntryList) prefixScanEntries(bucket string, prefix []byte, includeKeys, includeValues bool) (keys, values [][]byte) {
+// It returns active (non-deleted) entries and deleted keys separately.
+// If reg is provided, only entries matching the regex pattern are returned.
+func (pending *pendingEntryList) prefixScanEntries(bucket string, prefix []byte, reg string, includeKeys, includeValues bool) (keys, values [][]byte, err error) {
 	mp, ok := pending.entriesInBTree[bucket]
 	if !ok {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Collect entries matching the prefix (excluding deleted entries)
@@ -215,7 +223,24 @@ func (pending *pendingEntryList) prefixScanEntries(bucket string, prefix []byte,
 	}
 
 	if len(matchedEntries) == 0 {
-		return nil, nil
+		return nil, nil, nil
+	}
+
+	// Apply regex filter if provided
+	if reg != "" {
+		regex, err := regexp.Compile(reg)
+		if err != nil {
+			return nil, nil, err
+		}
+		var filtered []*Entry
+		for _, entry := range matchedEntries {
+			// Match against the key suffix after removing the prefix (same as DB behavior)
+			keySuffix := bytes.TrimPrefix(entry.Key, prefix)
+			if regex.Match(keySuffix) {
+				filtered = append(filtered, entry)
+			}
+		}
+		matchedEntries = filtered
 	}
 
 	// Sort entries by key
@@ -243,8 +268,13 @@ func (pending *pendingEntryList) prefixScanEntries(bucket string, prefix []byte,
 	return
 }
 
-// getDeletedKeys returns a set of deleted keys with given prefix from pending writes
-// If prefix is nil or empty, it returns all deleted keys
+// getDeletedKeys returns a set of deleted keys with given prefix from pending writes.
+//
+// Parameters:
+//   - bucket: the bucket name to search in
+//   - prefix: optional prefix filter; if nil or empty, returns all deleted keys in the bucket
+//
+// Returns a map where keys are string representations of deleted key bytes.
 func (pending *pendingEntryList) getDeletedKeys(bucket string, prefix []byte) map[string]bool {
 	mp, ok := pending.entriesInBTree[bucket]
 	if !ok {
@@ -318,18 +348,29 @@ func (pending *pendingEntryList) MaxOrMinKey(bucketName string, isMax bool) (key
 		DataStructureBTree,
 		bucketName,
 		func(entry *Entry) bool {
+			// Skip deleted entries in pending writes
+			if entry.Meta != nil && entry.Meta.Flag == DataDeleteFlag {
+				return true
+			}
+			// Also skip expired entries in pending writes
+			if entry.Meta != nil && utils.IsExpired(entry.Meta.TTL, entry.Meta.Timestamp) {
+				return true
+			}
 			maxKey = compareAndReturn(maxKey, entry.Key, 1)
 			minKey = compareAndReturn(minKey, entry.Key, -1)
 			pendingFound = true
 			return true
+
 		})
 
 	if !pendingFound {
 		return nil, false
 	}
+
 	if isMax {
 		return maxKey, true
 	}
+
 	return minKey, true
 }
 

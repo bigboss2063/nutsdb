@@ -103,10 +103,13 @@ func (bt *BTree) PrefixScan(prefix []byte, offset, limitNum int) []*Record {
 	return records
 }
 
-func (bt *BTree) PrefixSearchScan(prefix []byte, reg string, offset, limitNum int) []*Record {
+func (bt *BTree) PrefixSearchScan(prefix []byte, reg string, offset, limitNum int) ([]*Record, error) {
 	records := make([]*Record, 0)
 
-	rgx := regexp.MustCompile(reg)
+	rgx, err := regexp.Compile(reg)
+	if err != nil {
+		return records, err
+	}
 
 	bt.btree.Ascend(&Item[Record]{Key: prefix}, func(item *Item[Record]) bool {
 		if !bytes.HasPrefix(item.Key, prefix) {
@@ -128,7 +131,7 @@ func (bt *BTree) PrefixSearchScan(prefix []byte, reg string, offset, limitNum in
 		return limitNum != 0
 	})
 
-	return records
+	return records, nil
 }
 
 func (bt *BTree) Count() int {

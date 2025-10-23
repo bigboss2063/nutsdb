@@ -260,12 +260,13 @@ func (dll *DoublyLinkedList) PrefixScan(prefix []byte, offset, limitNum int) []*
 }
 
 // PrefixSearchScan scans records with the given prefix and regex pattern
-func (dll *DoublyLinkedList) PrefixSearchScan(prefix []byte, reg string, offset, limitNum int) []*Record {
-	records := make([]*Record, 0)
+func (dll *DoublyLinkedList) PrefixSearchScan(prefix []byte, reg string, offset, limitNum int) ([]*Record, error) {
 	rgx, err := regexp.Compile(reg)
 	if err != nil {
-		return records
+		return nil, err
 	}
+
+	records := make([]*Record, 0)
 
 	for e := dll.list.Front(); e != nil; e = e.Next() {
 		elem := e.Value.(*Item[Record])
@@ -289,7 +290,7 @@ func (dll *DoublyLinkedList) PrefixSearchScan(prefix []byte, reg string, offset,
 		}
 	}
 
-	return records
+	return records, nil
 }
 
 // Insert is an alias for InsertRecord (for compatibility with BTree interface)

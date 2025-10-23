@@ -87,7 +87,7 @@ type ListStructure interface {
 	// The regex is applied to the portion of the key after removing the prefix.
 	// offset: number of matching records to skip
 	// limitNum: maximum number of records to return
-	PrefixSearchScan(prefix []byte, reg string, offset, limitNum int) []*data.Record
+	PrefixSearchScan(prefix []byte, reg string, offset, limitNum int) ([]*data.Record, error)
 
 	// PopMin removes and returns the item with the smallest key.
 	// Returns the item and true if the list is not empty, nil and false otherwise.
