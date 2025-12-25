@@ -15,6 +15,7 @@ type WatchManagerWrapper struct {
 
 	// 运行控制
 	running atomic.Bool
+	started chan struct{} // Signal when distributor is ready
 }
 
 // NewWatchManagerWrapper 创建新的 WatchManagerWrapper
@@ -22,6 +23,7 @@ func NewWatchManagerWrapper(manager *watchManager, sm *StatusManager) *WatchMana
 	return &WatchManagerWrapper{
 		manager:       manager,
 		statusManager: sm,
+		started:       make(chan struct{}),
 	}
 }
 
@@ -42,8 +44,19 @@ func (ww *WatchManagerWrapper) Start(ctx context.Context) error {
 	ww.statusManager.Add(1)
 	go func() {
 		defer ww.statusManager.Done()
+		// Signal that distributor goroutine has started
+		close(ww.started)
 		ww.manager.startDistributor()
 	}()
+
+	// Wait for distributor goroutine to start before returning
+	// This ensures the component is ready when Start() returns
+	select {
+	case <-ww.started:
+		// Distributor goroutine has started
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timeout waiting for WatchManager distributor to start")
+	}
 
 	// 标记为运行状态
 	ww.running.Store(true)

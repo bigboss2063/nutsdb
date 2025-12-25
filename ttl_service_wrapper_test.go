@@ -122,9 +122,6 @@ func TestTTLServiceWrapper_ContextCancellation(t *testing.T) {
 	// Cancel the context
 	cancel()
 
-	// Give some time for the cancellation to propagate
-	time.Sleep(100 * time.Millisecond)
-
 	// Stop should complete quickly since context is already cancelled
 	start := time.Now()
 	if err := tw.Stop(2 * time.Second); err != nil {
@@ -190,13 +187,17 @@ func TestTTLServiceWrapper_QueueProcessing(t *testing.T) {
 
 	var eventsReceived []*ttl.ExpirationEvent
 	var mu sync.Mutex
-	cond := sync.NewCond(&mu)
+	eventReceived := make(chan struct{}, 10)
 
 	callback := func(events []*ttl.ExpirationEvent) {
 		mu.Lock()
 		eventsReceived = append(eventsReceived, events...)
-		cond.Signal()
 		mu.Unlock()
+		// Signal that events were received
+		select {
+		case eventReceived <- struct{}{}:
+		default:
+		}
 	}
 
 	// Scan function that returns some expired events
@@ -223,20 +224,13 @@ func TestTTLServiceWrapper_QueueProcessing(t *testing.T) {
 		t.Fatalf("Failed to start TTLServiceWrapper: %v", err)
 	}
 
-	// Wait for events to be processed
-	mu.Lock()
-	timeout := time.After(2 * time.Second)
-	for len(eventsReceived) < 2 {
-		mu.Unlock()
-		select {
-		case <-timeout:
-			t.Fatal("Timeout waiting for expiration events to be processed")
-		default:
-			time.Sleep(50 * time.Millisecond)
-		}
-		mu.Lock()
+	// Wait for events to be processed using channel
+	select {
+	case <-eventReceived:
+		// Events received
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for expiration events to be processed")
 	}
-	mu.Unlock()
 
 	// Stop the wrapper
 	if err := tw.Stop(2 * time.Second); err != nil {

@@ -81,13 +81,10 @@ func TestWatchManagerWrapper_SubscriberNotification(t *testing.T) {
 	t.Run("subscribers receive messages after start", func(t *testing.T) {
 		wrapper, sm := createTestWatchManagerWrapper()
 
-		// Start the wrapper
+		// Start the wrapper - it will wait for distributor to be ready
 		err := wrapper.Start(sm.Context())
 		require.NoError(t, err)
 		defer wrapper.Stop(5 * time.Second)
-
-		// Give distributor time to start
-		time.Sleep(100 * time.Millisecond)
 
 		// Subscribe to a bucket/key
 		bucket := "test_bucket"
@@ -116,13 +113,10 @@ func TestWatchManagerWrapper_SubscriberNotification(t *testing.T) {
 	t.Run("multiple subscribers receive messages", func(t *testing.T) {
 		wrapper, sm := createTestWatchManagerWrapper()
 
-		// Start the wrapper
+		// Start the wrapper - it will wait for distributor to be ready
 		err := wrapper.Start(sm.Context())
 		require.NoError(t, err)
 		defer wrapper.Stop(5 * time.Second)
-
-		// Give distributor time to start
-		time.Sleep(100 * time.Millisecond)
 
 		bucket := "test_bucket"
 		key := "test_key"
@@ -167,12 +161,9 @@ func TestWatchManagerWrapper_ChannelClosing(t *testing.T) {
 	t.Run("subscriber channels closed on stop", func(t *testing.T) {
 		wrapper, sm := createTestWatchManagerWrapper()
 
-		// Start the wrapper
+		// Start the wrapper - it will wait for distributor to be ready
 		err := wrapper.Start(sm.Context())
 		require.NoError(t, err)
-
-		// Give distributor time to start
-		time.Sleep(100 * time.Millisecond)
 
 		// Subscribe to a bucket/key
 		bucket := "test_bucket"
@@ -180,12 +171,9 @@ func TestWatchManagerWrapper_ChannelClosing(t *testing.T) {
 		subscriber, err := wrapper.GetManager().subscribe(bucket, key)
 		require.NoError(t, err)
 
-		// Stop the wrapper
+		// Stop the wrapper - this should close all channels
 		err = wrapper.Stop(5 * time.Second)
 		require.NoError(t, err)
-
-		// Wait for cleanup
-		time.Sleep(200 * time.Millisecond)
 
 		// Verify channel is closed
 		select {
@@ -199,12 +187,9 @@ func TestWatchManagerWrapper_ChannelClosing(t *testing.T) {
 	t.Run("multiple subscriber channels closed on stop", func(t *testing.T) {
 		wrapper, sm := createTestWatchManagerWrapper()
 
-		// Start the wrapper
+		// Start the wrapper - it will wait for distributor to be ready
 		err := wrapper.Start(sm.Context())
 		require.NoError(t, err)
-
-		// Give distributor time to start
-		time.Sleep(100 * time.Millisecond)
 
 		// Create multiple subscribers on different buckets/keys
 		type subInfo struct {
@@ -224,12 +209,9 @@ func TestWatchManagerWrapper_ChannelClosing(t *testing.T) {
 			subs[i].sub = sub
 		}
 
-		// Stop the wrapper
+		// Stop the wrapper - this should close all channels
 		err = wrapper.Stop(5 * time.Second)
 		require.NoError(t, err)
-
-		// Wait for cleanup
-		time.Sleep(200 * time.Millisecond)
 
 		// Verify all channels are closed
 		for _, s := range subs {
@@ -245,12 +227,9 @@ func TestWatchManagerWrapper_ChannelClosing(t *testing.T) {
 	t.Run("send message after stop returns error", func(t *testing.T) {
 		wrapper, sm := createTestWatchManagerWrapper()
 
-		// Start the wrapper
+		// Start the wrapper - it will wait for distributor to be ready
 		err := wrapper.Start(sm.Context())
 		require.NoError(t, err)
-
-		// Give distributor time to start
-		time.Sleep(100 * time.Millisecond)
 
 		// Stop the wrapper
 		err = wrapper.Stop(5 * time.Second)
@@ -274,12 +253,9 @@ func TestWatchManagerWrapper_ConcurrentOperations(t *testing.T) {
 	t.Run("concurrent subscribe and stop", func(t *testing.T) {
 		wrapper, sm := createTestWatchManagerWrapper()
 
-		// Start the wrapper
+		// Start the wrapper - it will wait for distributor to be ready
 		err := wrapper.Start(sm.Context())
 		require.NoError(t, err)
-
-		// Give distributor time to start
-		time.Sleep(100 * time.Millisecond)
 
 		var wg sync.WaitGroup
 		stopCh := make(chan struct{})
