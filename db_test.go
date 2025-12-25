@@ -287,8 +287,7 @@ func TestDB_Flock(t *testing.T) {
 		require.False(t, db2.flock.Locked())
 
 		err = db2.Close()
-		require.Error(t, err)
-		require.Equal(t, ErrDirUnlocked, err)
+		require.NoError(t, err)
 	})
 }
 

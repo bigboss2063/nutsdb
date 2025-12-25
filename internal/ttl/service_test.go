@@ -15,6 +15,7 @@
 package ttl
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -159,13 +160,15 @@ func TestService_RunAndClose(t *testing.T) {
 
 	service := NewService(mockClock, config, callback, scanFn)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	// Run the service
-	service.Run()
+	go service.Run(ctx)
 
 	// Wait for scanner to run at least one cycle
 	time.Sleep(50 * time.Millisecond)
 
 	// Close the service
+	cancel()
 	service.Close()
 
 	// Verify the service closed (queue is closed)
@@ -196,8 +199,10 @@ func TestService_ProcessExpirationEvents_EmptyBatch(t *testing.T) {
 
 	service := NewService(mockClock, config, callback, scanFn)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	// Run in a goroutine
-	go service.processExpirationEvents()
+	go service.processExpirationEvents(ctx)
 
 	// Close queue to trigger exit
 	service.queue.close()
@@ -228,8 +233,10 @@ func TestService_ProcessExpirationEvents_FullBatchFlush(t *testing.T) {
 
 	service := NewService(mockClock, config, callback, nil)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	// Run the worker
-	go service.processExpirationEvents()
+	go service.processExpirationEvents(ctx)
 
 	// Push events to fill the batch (use unique keys to avoid deduplication)
 	for i := 0; i < 3; i++ {
@@ -263,11 +270,12 @@ func TestService_ProcessExpirationEvents_WorkerCloseSignal(t *testing.T) {
 
 	service := NewService(mockClock, config, callback, nil)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	// Run the worker
-	go service.processExpirationEvents()
+	go service.processExpirationEvents(ctx)
 
 	// Close the workerCloseCh
-	close(service.workerCloseCh)
+	cancel()
 
 	// Wait for worker to exit
 	time.Sleep(10 * time.Millisecond)
@@ -281,8 +289,10 @@ func TestService_ProcessExpirationEvents_QueueClose(t *testing.T) {
 
 	service := NewService(mockClock, config, nil, nil)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	// Run the worker
-	go service.processExpirationEvents()
+	go service.processExpirationEvents(ctx)
 
 	// Push an event
 	event := &ExpirationEvent{
@@ -305,7 +315,7 @@ func TestService_ProcessExpirationEvents_QueueClose(t *testing.T) {
 func TestService_ProcessExpirationEvents_TimerFlush(t *testing.T) {
 	mockClock := NewMockClock(1000000)
 	config := DefaultConfig()
-	config.BatchSize = 10          // Large batch size so we don't auto-flush
+	config.BatchSize = 10                       // Large batch size so we don't auto-flush
 	config.BatchTimeout = 50 * time.Millisecond // Short timeout
 
 	eventsReceived := make([]*ExpirationEvent, 0)
@@ -320,8 +330,10 @@ func TestService_ProcessExpirationEvents_TimerFlush(t *testing.T) {
 
 	service := NewService(mockClock, config, callback, nil)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	// Run the worker
-	go service.processExpirationEvents()
+	go service.processExpirationEvents(ctx)
 
 	// Push one event (less than batch size)
 	event := &ExpirationEvent{

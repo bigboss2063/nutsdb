@@ -444,9 +444,12 @@ func TestTx_allocCommitBuffer(t *testing.T) {
 			// Set size larger than CommitBufferSize
 			tx.size = int64(db.opt.CommitBufferSize) + 1000
 			buff := tx.allocCommitBuffer()
-			assert.NotEqual(t, db.commitBuffer, buff)
+			// Use pointer comparison since assert.NotEqual uses reflect.DeepEqual
+			// which compares buffer contents, not pointers
+			assert.True(t, buff != db.commitBuffer, "expected new buffer for large transaction")
 			assert.NotNil(t, buff)
-			assert.Equal(t, int(tx.size), buff.Cap())
+			// buffer capacity should be at least tx.size (Grow may overallocate)
+			assert.GreaterOrEqual(t, buff.Cap(), int(tx.size))
 		})
 
 		tx.Rollback()

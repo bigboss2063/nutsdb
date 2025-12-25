@@ -46,6 +46,7 @@ type Tx struct {
 	pendingWrites     *pendingEntryList
 	size              int64
 	pendingBucketList pendingBucketList
+	lockAcquired      bool  // track if lock was acquired (for WriteBatch optimization)
 }
 
 type txnCb struct {
@@ -81,20 +82,8 @@ func runTxnCallback(cb *txnCb) {
 // the current read/write transaction is completed.
 // All transactions must be closed by calling Commit() or Rollback() when done.
 func (db *DB) Begin(writable bool) (tx *Tx, err error) {
-	tx, err = newTx(db, writable)
-	if err != nil {
-		return nil, err
-	}
-
-	tx.lock()
-	tx.setStatusRunning()
-	if db.closed {
-		tx.unlock()
-		tx.setStatusClosed()
-		return nil, ErrDBClosed
-	}
-
-	return
+	// 使用 TransactionManager 创建事务，needLock=true 因为需要获取 db.mu
+	return db.transactionManager.BeginTx(writable, true)
 }
 
 // newTx returns a newly initialized Tx object at given writable.
@@ -105,6 +94,7 @@ func newTx(db *DB, writable bool) (tx *Tx, err error) {
 		pendingWrites:     newPendingEntriesList(),
 		pendingBucketList: make(map[core.Ds]map[core.BucketName]*core.Bucket),
 	}
+	tx.setStatusRunning()
 
 	tx.id = tx.getTxID()
 
@@ -124,12 +114,6 @@ func (tx *Tx) CommitWith(cb func(error)) {
 	if tx.db == nil {
 		tx.setStatusClosed()
 		go runTxnCallback(&txnCb{user: cb, err: ErrDBClosed})
-		return
-	}
-
-	if tx.pendingWrites.size == 0 && len(tx.pendingBucketList) == 0 {
-		err := tx.Commit()
-		go runTxnCallback(&txnCb{user: cb, err: err})
 		return
 	}
 
@@ -198,6 +182,10 @@ func (tx *Tx) Commit() (err error) {
 		}
 
 		tx.unlock()
+
+		// 从 TransactionManager 注销事务
+		tx.db.transactionManager.UnregisterTx(tx.id)
+
 		tx.db = nil
 
 		tx.pendingWrites = nil
@@ -555,6 +543,9 @@ func (tx *Tx) Rollback() error {
 	tx.setStatusClosed()
 	tx.unlock()
 
+	// 从 TransactionManager 注销事务
+	tx.db.transactionManager.UnregisterTx(tx.id)
+
 	tx.db = nil
 	tx.pendingWrites = nil
 
@@ -568,15 +559,20 @@ func (tx *Tx) lock() {
 	} else {
 		tx.db.mu.RLock()
 	}
+	tx.lockAcquired = true
 }
 
 // unlock unlocks the database based on the transaction type.
 func (tx *Tx) unlock() {
+	if !tx.lockAcquired {
+		return  // Lock was not acquired, nothing to unlock
+	}
 	if tx.writable {
 		tx.db.mu.Unlock()
 	} else {
 		tx.db.mu.RUnlock()
 	}
+	tx.lockAcquired = false
 }
 
 func (tx *Tx) handleErr(err error) {

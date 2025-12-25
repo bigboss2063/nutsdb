@@ -15,6 +15,7 @@
 package ttl
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -30,7 +31,6 @@ func TestNewScanner(t *testing.T) {
 		assert.Equal(t, 20, scanner.sampleSize)
 		assert.Equal(t, 0.25, scanner.expiredThreshold)
 		assert.Equal(t, 10000, scanner.maxScanKeys)
-		assert.False(t, scanner.running)
 	})
 
 	t.Run("with custom values", func(t *testing.T) {
@@ -106,15 +106,30 @@ func TestScanner_SetChecker(t *testing.T) {
 	scanner.mu.RUnlock()
 }
 
-func TestScanner_Stop_NotRunning(t *testing.T) {
-	// Test that stopping a scanner that was never started is a no-op
-	scanner := NewScanner(ScannerConfig{})
-	assert.False(t, scanner.running)
+func TestScanner_Run_ContextCancel(t *testing.T) {
+	scanner := NewScanner(ScannerConfig{
+		ScanInterval: 10 * time.Millisecond,
+	})
 
-	// Stop should not panic and should remain not running
-	scanner.Stop()
-	scanner.Stop()
-	scanner.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
 
-	assert.False(t, scanner.running)
+	scanFn := func() ([]*ExpirationEvent, error) {
+		return nil, nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		scanner.Run(ctx, scanFn)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Scanner did not exit after context cancellation")
+	}
 }

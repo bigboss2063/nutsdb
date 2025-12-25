@@ -15,6 +15,8 @@
 package ttl
 
 import (
+	"context"
+	"sync"
 	"time"
 )
 
@@ -42,8 +44,6 @@ type Service struct {
 	scanFn          ScanFunc             // Scan function called each tick
 	expiredCallback BatchExpiredCallback // Handler for actual batch deletion
 	queue           *expirationQueue     // Queue for expiration events
-	workerCloseCh   chan struct{}        // Channel to signal worker shutdown
-	workerDone      chan struct{}        // Channel to wait for worker completion
 	batchSize       int                  // Batch size for processing expiration events
 	batchTimeout    time.Duration        // Timeout for processing expiration events
 }
@@ -68,8 +68,6 @@ func NewService(clk Clock, config Config, callback BatchExpiredCallback, scanFn 
 		expiredCallback: callback,
 		scanFn:          scanFn,
 		queue:           newExpirationQueue(config.QueueSize),
-		workerCloseCh:   make(chan struct{}),
-		workerDone:      make(chan struct{}),
 		batchSize:       config.BatchSize,
 		batchTimeout:    config.BatchTimeout,
 	}
@@ -90,32 +88,27 @@ func NewService(clk Clock, config Config, callback BatchExpiredCallback, scanFn 
 
 // Run starts the TTL service with periodic scanning.
 // The scanFn is called each scan cycle to perform the scan within a transaction.
-func (s *Service) Run() {
-	go s.processExpirationEvents()
-	go s.scanner.Run(s.scanFn)
+func (s *Service) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		s.processExpirationEvents(ctx)
+	}()
+
+	go func() {
+		defer wg.Done()
+		s.scanner.Run(ctx, s.scanFn)
+	}()
+
+	wg.Wait()
 }
 
 // Close stops the TTL service and releases all resources.
 func (s *Service) Close() {
-	s.scanner.Stop()
-
-	// Close queue first to stop accepting new events
+	// No-op: lifecycle is managed by context in Run
 	s.queue.close()
-
-	// Signal worker to stop (non-blocking, check if already closed)
-	select {
-	case <-s.workerCloseCh:
-		// Already closed
-	default:
-		close(s.workerCloseCh)
-	}
-
-	// Wait for worker to finish with timeout
-	select {
-	case <-s.workerDone:
-	case <-time.After(time.Second):
-		// Timeout, worker may be blocked
-	}
 }
 
 // GetChecker returns the checker instance for use by data structures.
@@ -150,9 +143,7 @@ func (s *Service) onExpiredBatch(events []*ExpirationEvent) {
 }
 
 // processExpirationEvents processes expiration events in batches for efficient deletion.
-func (s *Service) processExpirationEvents() {
-	defer close(s.workerDone)
-
+func (s *Service) processExpirationEvents(ctx context.Context) {
 	batch := make([]*ExpirationEvent, 0, s.batchSize)
 	timer := time.NewTimer(s.batchTimeout)
 	defer timer.Stop()
@@ -166,7 +157,7 @@ func (s *Service) processExpirationEvents() {
 
 	for {
 		select {
-		case <-s.workerCloseCh:
+		case <-ctx.Done():
 			// Worker is shutting down, flush remaining batch
 			flushBatch()
 			return

@@ -60,9 +60,11 @@ type (
 		ActiveFile              *DataFile
 		MaxFileID               int64
 		mu                      sync.RWMutex
-		KeyCount                int // total key number ,include expired, deleted, repeated.
-		closed                  bool
-		isMerging               int32 // atomic flag to indicate merge is in progress
+		KeyCount                int                 // total key number ,include expired, deleted, repeated.
+		statusManager           *StatusManager      // 状态管理器
+		transactionManager      *TransactionManager // 事务管理器
+		mergeWorker             *MergeWorker        // Merge 工作器
+		isMerging               int32               // atomic flag to indicate merge is in progress
 		fm                      *FileManager
 		flock                   *flock.Flock
 		commitBuffer            *bytes.Buffer
@@ -71,7 +73,9 @@ type (
 		mergeWorkCloseCh        chan struct{}
 		writeCh                 chan *request
 		ttlService              *ttl.Service
-		RecordCount             int64 // current valid record count, exclude deleted, repeated
+		ttlServiceWrapper       *TTLServiceWrapper   // TTL Service 包装器
+		watchManagerWrapper     *WatchManagerWrapper // Watch Manager 包装器
+		RecordCount             int64                // current valid record count, exclude deleted, repeated
 		bucketManager           *BucketManager
 		hintKeyAndRAMIdxModeLru *utils.LRUCache // lru cache for HintKeyAndRAMIdxMode
 		snowflakeManager        *SnowflakeManager
@@ -105,7 +109,6 @@ func open(opt Options) (*DB, error) {
 		MaxFileID:               0,
 		opt:                     opt,
 		KeyCount:                0,
-		closed:                  false,
 		fm:                      NewFileManager(opt.RWMode, opt.MaxFdNumsInCache, opt.CleanFdsCacheThreshold, opt.SegmentSize),
 		mergeStartCh:            make(chan struct{}),
 		mergeEndCh:              make(chan error, 1),
@@ -173,9 +176,65 @@ func open(opt Options) (*DB, error) {
 		db.watchManager = nil
 	}
 
-	go db.mergeWorker()
+	// 创建并配置 StatusManager
+	smConfig := DefaultStatusManagerConfig()
+	// 从 Options 中读取配置
+	smConfig.ShutdownTimeout = 30 * time.Second
+
+	logger := &DefaultComponentLogger{}
+	db.statusManager = NewStatusManager(smConfig, logger)
+
+	// 创建组件包装器，从 Options 中读取配置
+	db.transactionManager = NewTransactionManager(db, db.statusManager, logger)
+
+	// 配置 MergeWorker
+	mergeConfig := MergeConfig{
+		MergeInterval:   opt.MergeInterval,
+		EnableAutoMerge: opt.MergeInterval > 0, // 如果设置了间隔，启用自动合并
+	}
+	db.mergeWorker = NewMergeWorker(db, db.statusManager, mergeConfig, logger)
+
+	db.ttlServiceWrapper = NewTTLServiceWrapper(db.ttlService, db.statusManager, logger)
+
+	if db.watchManager != nil {
+		db.watchManagerWrapper = NewWatchManagerWrapper(db.watchManager, db.statusManager, logger)
+	}
+
+	// 注册组件（按顺序注册，关闭时会按逆序关闭）
+	// 1. TransactionManager
+	if err := db.statusManager.RegisterComponent("TransactionManager", db.transactionManager); err != nil {
+		return nil, fmt.Errorf("failed to register TransactionManager: %w", err)
+	}
+
+	// 2. MergeWorker
+	if err := db.statusManager.RegisterComponent("MergeWorker", db.mergeWorker); err != nil {
+		return nil, fmt.Errorf("failed to register MergeWorker: %w", err)
+	}
+
+	// 3. TTLServiceWrapper
+	if err := db.statusManager.RegisterComponent("TTLServiceWrapper", db.ttlServiceWrapper); err != nil {
+		return nil, fmt.Errorf("failed to register TTLServiceWrapper: %w", err)
+	}
+
+	// 4. WatchManagerWrapper（如果启用）
+	if db.watchManagerWrapper != nil {
+		if err := db.statusManager.RegisterComponent("WatchManagerWrapper", db.watchManagerWrapper); err != nil {
+			return nil, fmt.Errorf("failed to register WatchManagerWrapper: %w", err)
+		}
+	}
+
+	// 启动所有组件
+	if err := db.statusManager.Start(); err != nil {
+		// 启动失败，清理资源
+		if db.flock != nil && db.flock.Locked() {
+			_ = db.flock.Unlock()
+		}
+		return nil, fmt.Errorf("failed to start components: %w", err)
+	}
+
+	// 启动 doWrites goroutine
+	db.statusManager.Add(1)
 	go db.doWrites()
-	go db.ttlService.Run()
 
 	return db, nil
 }
@@ -240,16 +299,21 @@ func (db *DB) BackupTarGZ(w io.Writer) error {
 func (db *DB) Close() error {
 	db.mu.Lock()
 
-	if db.closed {
+	// 检查状态管理器
+	if db.statusManager.Status() == StatusClosed {
 		db.mu.Unlock()
 		return ErrDBClosed
 	}
 
-	db.closed = true
-	// Release mutex before calling release() to avoid deadlock with merge worker
-	// which may be waiting for the mutex inside merge operations
 	db.mu.Unlock()
 
+	// 使用 StatusManagerV2 关闭所有组件
+	if err := db.statusManager.Close(); err != nil {
+		// 记录错误但继续关闭流程
+		log.Printf("StatusManager.Close() error: %v", err)
+	}
+
+	// 释放资源
 	err := db.release()
 	if err != nil {
 		return err
@@ -262,35 +326,44 @@ func (db *DB) Close() error {
 func (db *DB) release() error {
 	GCEnable := db.opt.GCWhenClose
 
-	err := db.ActiveFile.rwManager.Release()
-	if err != nil {
-		return err
+	if db.ActiveFile != nil && db.ActiveFile.rwManager != nil {
+		err := db.ActiveFile.rwManager.Release()
+		if err != nil {
+			return err
+		}
 	}
 
 	db.ActiveFile = nil
 
-	err = db.fm.Close()
-
-	if err != nil {
-		return err
+	if db.fm != nil {
+		err := db.fm.Close()
+		if err != nil {
+			return err
+		}
 	}
 
 	// Close TTL service first to stop the scanner goroutine
-	db.ttlService.Close()
+	if db.ttlService != nil {
+		db.ttlService.Close()
+	}
 
 	// Signal merge worker to stop after TTL service is closed
-	db.mergeWorkCloseCh <- struct{}{}
+	if db.mergeWorkCloseCh != nil {
+		select {
+		case db.mergeWorkCloseCh <- struct{}{}:
+		default:
+			// Channel might be closed or full, ignore
+		}
+	}
 
 	// Now safe to release Index as all background services are stopped
 	db.Index = nil
 
-	if !db.flock.Locked() {
-		return ErrDirUnlocked
-	}
-
-	err = db.flock.Unlock()
-	if err != nil {
-		return err
+	if db.flock != nil && db.flock.Locked() {
+		err := db.flock.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 
 	db.fm = nil
@@ -379,7 +452,9 @@ func (db *DB) writeRequests(reqs []*request) error {
 
 	for _, req := range reqs {
 		tx := req.tx
+
 		cerr := db.commitTransaction(tx)
+
 		if cerr != nil {
 			err = cerr
 		}
@@ -413,6 +488,7 @@ func (db *DB) getSnowflakeNode() *snowflake.Node {
 }
 
 func (db *DB) doWrites() {
+	defer db.statusManager.Done()
 	pendingCh := make(chan struct{}, 1)
 	writeRequests := func(reqs []*request) {
 		if err := db.writeRequests(reqs); err != nil {
@@ -424,10 +500,15 @@ func (db *DB) doWrites() {
 	reqs := make([]*request, 0, 10)
 	var r *request
 	var ok bool
+	ctx := db.statusManager.Context()
 	for {
-		r, ok = <-db.writeCh
-		if !ok {
+		select {
+		case <-ctx.Done():
 			goto closedCase
+		case r, ok = <-db.writeCh:
+			if !ok {
+				goto closedCase
+			}
 		}
 
 		for {
@@ -440,6 +521,8 @@ func (db *DB) doWrites() {
 
 			select {
 			// Either push to pending, or continue to pick from writeCh.
+			case <-ctx.Done():
+				goto closedCase
 			case r, ok = <-db.writeCh:
 				if !ok {
 					goto closedCase
@@ -1031,7 +1114,7 @@ func (db *DB) checkListExpired() {
 
 // IsClose return the value that represents the status of DB
 func (db *DB) IsClose() bool {
-	return db.closed
+	return db.statusManager.Status() == StatusClosed
 }
 
 // handleExpiredKeys processes a batch of expiration events in a single transaction.

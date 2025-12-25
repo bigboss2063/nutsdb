@@ -31,8 +31,8 @@ import (
 var ErrDontNeedMerge = errors.New("the number of files waiting to be merged is less than 2")
 
 func (db *DB) Merge() error {
-	db.mergeStartCh <- struct{}{}
-	return <-db.mergeEndCh
+	// 使用 MergeWorker 触发合并
+	return db.mergeWorker.TriggerMerge()
 }
 
 func (db *DB) merge() error {
@@ -308,7 +308,8 @@ func (db *DB) buildHintFilesAfterMerge(startFileID, endFileID int64) error {
 	return nil
 }
 
-func (db *DB) mergeWorker() {
+func (db *DB) mergeWorkerLegacy() {
+	defer db.statusManager.Done()
 	var ticker *time.Ticker
 
 	if db.opt.MergeInterval != 0 {
@@ -318,12 +319,17 @@ func (db *DB) mergeWorker() {
 		ticker.Stop()
 	}
 
+	ctx := db.statusManager.Context()
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-db.mergeStartCh:
 			// Check for close signal before starting merge to avoid deadlock with db.Close()
 			select {
 			case <-db.mergeWorkCloseCh:
+				return
+			case <-ctx.Done():
 				return
 			default:
 			}
@@ -345,6 +351,8 @@ func (db *DB) mergeWorker() {
 			// Check for close signal before starting merge
 			select {
 			case <-db.mergeWorkCloseCh:
+				return
+			case <-ctx.Done():
 				return
 			default:
 			}
