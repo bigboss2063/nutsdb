@@ -21,25 +21,17 @@ type TransactionManager struct {
 	// 配置
 	maxActiveTxs int64
 
-	// 日志
-	logger ComponentLogger
-
 	// 运行状态
 	running atomic.Bool
 	mu      sync.RWMutex
 }
 
 // NewTransactionManager 创建新的 TransactionManager
-func NewTransactionManager(db *DB, sm *StatusManager, logger ComponentLogger) *TransactionManager {
-	if logger == nil {
-		logger = &DefaultComponentLogger{}
-	}
-
+func NewTransactionManager(db *DB, sm *StatusManager) *TransactionManager {
 	return &TransactionManager{
 		db:            db,
 		statusManager: sm,
 		maxActiveTxs:  0, // 0 表示无限制
-		logger:        logger,
 	}
 }
 
@@ -58,15 +50,11 @@ func (tm *TransactionManager) Start(ctx context.Context) error {
 		return fmt.Errorf("TransactionManager already running")
 	}
 
-	tm.logger.Infof("TransactionManager starting")
-
 	// 初始化活跃事务计数
 	tm.activeTxCount.Store(0)
 
 	// 标记为运行状态
 	tm.running.Store(true)
-
-	tm.logger.Infof("TransactionManager started successfully")
 
 	return nil
 }
@@ -78,26 +66,18 @@ func (tm *TransactionManager) Stop(timeout time.Duration) error {
 	tm.mu.Lock()
 	if !tm.running.Load() {
 		tm.mu.Unlock()
-		tm.logger.Infof("TransactionManager already stopped")
 		return nil
 	}
 	tm.mu.Unlock()
 
-	tm.logger.Infof("TransactionManager stopping, waiting for %d active transactions", tm.activeTxCount.Load())
-
 	// 等待所有活跃事务完成
-	if err := tm.WaitForActiveTxs(timeout); err != nil {
-		tm.logger.Warnf("TransactionManager stop timeout: %v", err)
-		// 即使超时，也继续停止流程
-	}
+	tm.WaitForActiveTxs(timeout)
 
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
 	// 标记为停止状态
 	tm.running.Store(false)
-
-	tm.logger.Infof("TransactionManager stopped successfully")
 
 	return nil
 }
@@ -159,8 +139,6 @@ func (tm *TransactionManager) RegisterTx(tx *Tx) error {
 	tm.activeTxs.Store(tx.id, tx)
 	tm.activeTxCount.Add(1)
 
-	tm.logger.Debugf("Transaction %d registered, active count: %d", tx.id, tm.activeTxCount.Load())
-
 	return nil
 }
 
@@ -168,7 +146,6 @@ func (tm *TransactionManager) RegisterTx(tx *Tx) error {
 func (tm *TransactionManager) UnregisterTx(txID uint64) {
 	if _, loaded := tm.activeTxs.LoadAndDelete(txID); loaded {
 		tm.activeTxCount.Add(-1)
-		tm.logger.Debugf("Transaction %d unregistered, active count: %d", txID, tm.activeTxCount.Load())
 	}
 }
 
@@ -187,7 +164,6 @@ func (tm *TransactionManager) WaitForActiveTxs(timeout time.Duration) error {
 	for {
 		count := tm.activeTxCount.Load()
 		if count == 0 {
-			tm.logger.Infof("All active transactions completed")
 			return nil
 		}
 

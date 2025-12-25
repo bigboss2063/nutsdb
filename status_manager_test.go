@@ -106,7 +106,7 @@ func TestStatusManager_StateInitialization(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sm := NewStatusManager(tt.config, nil)
+			sm := NewStatusManager(tt.config)
 			defer sm.Close()
 
 			// 验证初始状态
@@ -141,7 +141,7 @@ func TestStatusManager_ConcurrentStateQueries(t *testing.T) {
 		ShutdownTimeout: 5 * time.Second,
 	}
 
-	sm := NewStatusManager(config, nil)
+	sm := NewStatusManager(config)
 	defer sm.Close()
 
 	// 注册一些模拟组件
@@ -214,7 +214,7 @@ func TestStatusManager_ConcurrentStateQueriesDuringTransition(t *testing.T) {
 		ShutdownTimeout: 5 * time.Second,
 	}
 
-	sm := NewStatusManager(config, nil)
+	sm := NewStatusManager(config)
 
 	// 注册一个带延迟的组件，使启动过程更慢
 	slowComp := NewMockComponent("slow_component").WithStartDelay(200 * time.Millisecond)
@@ -297,7 +297,7 @@ func TestStatusManager_StateQueryConsistency(t *testing.T) {
 		ShutdownTimeout: 5 * time.Second,
 	}
 
-	sm := NewStatusManager(config, nil)
+	sm := NewStatusManager(config)
 	defer sm.Close()
 
 	// 注册组件
@@ -351,7 +351,7 @@ func TestStatusManager_IsOperationalConsistency(t *testing.T) {
 		ShutdownTimeout: 5 * time.Second,
 	}
 
-	sm := NewStatusManager(config, nil)
+	sm := NewStatusManager(config)
 	defer sm.Close()
 
 	// 注册组件
@@ -425,7 +425,7 @@ func TestStatusManager_ContextCancellation(t *testing.T) {
 		ShutdownTimeout: 5 * time.Second,
 	}
 
-	sm := NewStatusManager(config, nil)
+	sm := NewStatusManager(config)
 
 	// 注册组件
 	comp := NewMockComponent("test_component")

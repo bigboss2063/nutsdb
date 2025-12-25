@@ -46,9 +46,6 @@ type StatusManager struct {
 	// 错误处理
 	errorHandler ComponentErrorHandler
 
-	// 日志
-	logger ComponentLogger
-
 	// 关闭进度
 	shutdownProgress *ShutdownProgress
 }
@@ -66,11 +63,7 @@ func DefaultStatusManagerConfig() StatusManagerConfig {
 }
 
 // NewStatusManager 创建新的 StatusManager
-func NewStatusManager(config StatusManagerConfig, logger ComponentLogger) *StatusManager {
-	if logger == nil {
-		logger = &DefaultComponentLogger{}
-	}
-
+func NewStatusManager(config StatusManagerConfig) *StatusManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	sm := &StatusManager{
@@ -79,8 +72,7 @@ func NewStatusManager(config StatusManagerConfig, logger ComponentLogger) *Statu
 		cancel:           cancel,
 		transitionLog:    NewStateTransitionLog(100),
 		config:           config,
-		errorHandler:     NewDefaultErrorHandler(logger, nil),
-		logger:           logger,
+		errorHandler:     NewDefaultErrorHandler(nil),
 		shutdownProgress: nil,
 	}
 
@@ -154,8 +146,6 @@ func (sm *StatusManager) RegisterComponent(name string, component Component) err
 	sm.components.Store(name, wrapper)
 	sm.componentNames = append(sm.componentNames, name)
 
-	sm.logger.Infof("Component %s registered", name)
-
 	return nil
 }
 
@@ -214,8 +204,6 @@ func (sm *StatusManager) transitionTo(toState Status, reason string) error {
 		Error:     nil,
 	})
 
-	sm.logger.Infof("State transition: %s -> %s (reason: %s)", fromState, toState, reason)
-
 	return nil
 }
 
@@ -258,12 +246,8 @@ func (sm *StatusManager) Start() error {
 		return fmt.Errorf("cannot start: current status is %s, expected Initializing", currentStatus)
 	}
 
-	sm.logger.Infof("Starting StatusManager and all components")
-
 	// 获取所有组件名称（按注册顺序）
 	componentNames := sm.getAllComponents()
-
-	sm.logger.Infof("Component startup order: %v", componentNames)
 
 	// 记录已启动的组件，用于失败时回滚
 	startedComponents := make([]string, 0, len(componentNames))
@@ -278,15 +262,12 @@ func (sm *StatusManager) Start() error {
 
 		component := wrapper.GetComponent()
 
-		sm.logger.Infof("Starting component: %s", name)
 		wrapper.SetStatus(ComponentStatusStarting)
 
 		// 启动组件
 		if err := component.Start(sm.ctx); err != nil {
 			wrapper.SetStatus(ComponentStatusFailed)
 			wrapper.SetLastError(err)
-
-			sm.logger.Errorf("Component %s failed to start: %v", name, err)
 
 			// 处理启动错误
 			wrappedErr := sm.errorHandler.HandleStartupError(name, err)
@@ -301,8 +282,6 @@ func (sm *StatusManager) Start() error {
 		wrapper.SetStatus(ComponentStatusRunning)
 		wrapper.SetStartTime(time.Now())
 		startedComponents = append(startedComponents, name)
-
-		sm.logger.Infof("Component %s started successfully", name)
 	}
 
 	// 所有组件启动成功，转换到 Open 状态
@@ -311,33 +290,25 @@ func (sm *StatusManager) Start() error {
 		return err
 	}
 
-	sm.logger.Infof("StatusManager started successfully")
-
 	return nil
 }
 
 // rollbackStartup 回滚已启动的组件
 // 按照启动顺序的逆序停止组件
 func (sm *StatusManager) rollbackStartup(startedComponents []string) {
-	sm.logger.Warnf("Rolling back startup, stopping %d components", len(startedComponents))
-
 	// 逆序停止组件
 	for i := len(startedComponents) - 1; i >= 0; i-- {
 		name := startedComponents[i]
 		wrapper, err := sm.getComponentWrapper(name)
 		if err != nil {
-			sm.logger.Errorf("Failed to get component %s during rollback: %v", name, err)
 			continue
 		}
 
 		component := wrapper.GetComponent()
 		wrapper.SetStatus(ComponentStatusStopping)
 
-		sm.logger.Infof("Stopping component %s during rollback", name)
-
 		// 使用较短的超时时间进行回滚
 		if err := component.Stop(5 * time.Second); err != nil {
-			sm.logger.Errorf("Failed to stop component %s during rollback: %v", name, err)
 			wrapper.SetStatus(ComponentStatusFailed)
 			wrapper.SetLastError(err)
 		} else {
@@ -345,33 +316,33 @@ func (sm *StatusManager) rollbackStartup(startedComponents []string) {
 			wrapper.SetStopTime(time.Now())
 		}
 	}
-
-	sm.logger.Infof("Rollback completed")
 }
 
 // Close 关闭所有组件并清理资源
 // 按照注册顺序的逆序关闭组件，实现优雅关闭
 func (sm *StatusManager) Close() error {
+	// Use mutex to prevent concurrent Close() calls from racing
+	sm.componentsMu.Lock()
 	currentStatus := sm.Status()
 
-	// 幂等性：如果已经是 Closed 状态，直接返回
+	// Idempotent: if already Closed, return immediately
 	if currentStatus == StatusClosed {
-		sm.logger.Infof("StatusManager already closed, skipping")
+		sm.componentsMu.Unlock()
 		return nil
 	}
 
-	// 如果已经在关闭中，等待关闭完成
+	// If already closing, wait for completion
 	if currentStatus == StatusClosing {
-		sm.logger.Infof("StatusManager already closing, waiting for completion")
+		sm.componentsMu.Unlock()
 		return sm.waitForClosed()
 	}
 
-	sm.logger.Infof("Closing StatusManager and all components")
-
-	// 转换到 Closing 状态
+	// Transition to Closing state while holding the lock
 	if err := sm.transitionTo(StatusClosing, "Close() called"); err != nil {
+		sm.componentsMu.Unlock()
 		return err
 	}
+	sm.componentsMu.Unlock()
 
 	// 取消 context，通知所有组件开始关闭
 	sm.cancel()
@@ -384,8 +355,6 @@ func (sm *StatusManager) Close() error {
 	for i, name := range componentNames {
 		shutdownOrder[len(componentNames)-1-i] = name
 	}
-
-	sm.logger.Infof("Component shutdown order: %v", shutdownOrder)
 
 	// 初始化关闭进度跟踪
 	sm.shutdownProgress = NewShutdownProgress(len(shutdownOrder))
@@ -405,9 +374,7 @@ func (sm *StatusManager) Close() error {
 	// 等待关闭完成或超时
 	select {
 	case <-doneCh:
-		sm.logger.Infof("All components stopped successfully")
 	case <-shutdownCtx.Done():
-		sm.logger.Warnf("Shutdown timeout reached after %v, forcing closure", sm.config.ShutdownTimeout)
 		sm.shutdownProgress.SetCurrentPhase("Timeout - forcing closure")
 	}
 
@@ -415,29 +382,23 @@ func (sm *StatusManager) Close() error {
 	sm.wg.Wait()
 
 	// 转换到 Closed 状态
-	if err := sm.transitionTo(StatusClosed, "all components stopped"); err != nil {
-		sm.logger.Errorf("Failed to transition to Closed state: %v", err)
-	}
-
-	sm.logger.Infof("StatusManager closed successfully")
+	sm.transitionTo(StatusClosed, "all components stopped")
 
 	return nil
 }
 
 // shutdownComponents 按顺序关闭组件
 func (sm *StatusManager) shutdownComponents(order []string) {
+	// Handle empty component list
+	if len(order) == 0 {
+		sm.shutdownProgress.SetCurrentPhase("Complete")
+		return
+	}
+
 	for _, name := range order {
 		wrapper, err := sm.getComponentWrapper(name)
 		if err != nil {
-			sm.logger.Errorf("Failed to get component %s during shutdown: %v", name, err)
 			sm.shutdownProgress.AddFailedComponent(name)
-			sm.shutdownProgress.IncrementStopped()
-			continue
-		}
-
-		// 跳过未运行的组件
-		if wrapper.GetStatus() != ComponentStatusRunning {
-			sm.logger.Infof("Skipping component %s (status: %s)", name, wrapper.GetStatus())
 			sm.shutdownProgress.IncrementStopped()
 			continue
 		}
@@ -445,17 +406,15 @@ func (sm *StatusManager) shutdownComponents(order []string) {
 		component := wrapper.GetComponent()
 		wrapper.SetStatus(ComponentStatusStopping)
 
-		sm.logger.Infof("Stopping component: %s", name)
-
-		// 计算剩余超时时间
+		// Calculate remaining timeout per component
 		remainingTimeout := sm.config.ShutdownTimeout / time.Duration(len(order))
 		if remainingTimeout < time.Second {
 			remainingTimeout = time.Second
 		}
 
-		// 停止组件
+		// Always try to stop the component - Stop() should be idempotent
+		// This handles cases where components are registered after Start() and started manually
 		if err := component.Stop(remainingTimeout); err != nil {
-			sm.logger.Errorf("Component %s failed to stop: %v", name, err)
 			wrapper.SetStatus(ComponentStatusFailed)
 			wrapper.SetLastError(err)
 			sm.errorHandler.HandleShutdownError(name, err)
@@ -463,7 +422,6 @@ func (sm *StatusManager) shutdownComponents(order []string) {
 		} else {
 			wrapper.SetStatus(ComponentStatusStopped)
 			wrapper.SetStopTime(time.Now())
-			sm.logger.Infof("Component %s stopped successfully", name)
 		}
 
 		sm.shutdownProgress.IncrementStopped()
@@ -492,6 +450,7 @@ func (sm *StatusManager) waitForClosed() error {
 }
 
 // GetShutdownProgress 获取关闭进度
+// Returns nil if shutdown has not started yet
 func (sm *StatusManager) GetShutdownProgress() *ShutdownProgress {
 	return sm.shutdownProgress
 }

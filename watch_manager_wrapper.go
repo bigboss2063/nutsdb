@@ -15,21 +15,13 @@ type WatchManagerWrapper struct {
 
 	// 运行控制
 	running atomic.Bool
-
-	// 日志
-	logger ComponentLogger
 }
 
 // NewWatchManagerWrapper 创建新的 WatchManagerWrapper
-func NewWatchManagerWrapper(manager *watchManager, sm *StatusManager, logger ComponentLogger) *WatchManagerWrapper {
-	if logger == nil {
-		logger = &DefaultComponentLogger{}
-	}
-
+func NewWatchManagerWrapper(manager *watchManager, sm *StatusManager) *WatchManagerWrapper {
 	return &WatchManagerWrapper{
 		manager:       manager,
 		statusManager: sm,
-		logger:        logger,
 	}
 }
 
@@ -45,8 +37,6 @@ func (ww *WatchManagerWrapper) Start(ctx context.Context) error {
 		return fmt.Errorf("WatchManager already running")
 	}
 
-	ww.logger.Infof("WatchManager starting")
-
 	// Watch Manager 在创建时已经初始化
 	// 这里只需要启动 distributor goroutine
 	ww.statusManager.Add(1)
@@ -58,8 +48,6 @@ func (ww *WatchManagerWrapper) Start(ctx context.Context) error {
 	// 标记为运行状态
 	ww.running.Store(true)
 
-	ww.logger.Infof("WatchManager started successfully")
-
 	return nil
 }
 
@@ -68,17 +56,12 @@ func (ww *WatchManagerWrapper) Start(ctx context.Context) error {
 // 实现 Component 接口
 func (ww *WatchManagerWrapper) Stop(timeout time.Duration) error {
 	if !ww.running.Load() {
-		ww.logger.Infof("WatchManager already stopped")
 		return nil
 	}
 
-	ww.logger.Infof("WatchManager stopping, notifying all subscribers")
-
 	// 关闭 Watch Manager
 	// 这会取消 context，通知所有 goroutine 停止
-	if err := ww.manager.close(); err != nil {
-		ww.logger.Warnf("WatchManager close error: %v", err)
-	}
+	ww.manager.close()
 
 	// 等待 Watch Manager 完成清理
 	// Watch Manager 的 startDistributor 会在 context 取消后退出
@@ -93,7 +76,6 @@ func (ww *WatchManagerWrapper) Stop(timeout time.Duration) error {
 		}
 
 		if time.Now().After(deadline) {
-			ww.logger.Warnf("WatchManager stop timeout after %v", timeout)
 			break
 		}
 
@@ -102,8 +84,6 @@ func (ww *WatchManagerWrapper) Stop(timeout time.Duration) error {
 
 	// 标记为停止状态
 	ww.running.Store(false)
-
-	ww.logger.Infof("WatchManager stopped successfully")
 
 	return nil
 }

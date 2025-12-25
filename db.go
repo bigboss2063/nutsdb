@@ -181,23 +181,22 @@ func open(opt Options) (*DB, error) {
 	// 从 Options 中读取配置
 	smConfig.ShutdownTimeout = 30 * time.Second
 
-	logger := &DefaultComponentLogger{}
-	db.statusManager = NewStatusManager(smConfig, logger)
+	db.statusManager = NewStatusManager(smConfig)
 
 	// 创建组件包装器，从 Options 中读取配置
-	db.transactionManager = NewTransactionManager(db, db.statusManager, logger)
+	db.transactionManager = NewTransactionManager(db, db.statusManager)
 
 	// 配置 MergeWorker
 	mergeConfig := MergeConfig{
 		MergeInterval:   opt.MergeInterval,
 		EnableAutoMerge: opt.MergeInterval > 0, // 如果设置了间隔，启用自动合并
 	}
-	db.mergeWorker = NewMergeWorker(db, db.statusManager, mergeConfig, logger)
+	db.mergeWorker = NewMergeWorker(db, db.statusManager, mergeConfig)
 
-	db.ttlServiceWrapper = NewTTLServiceWrapper(db.ttlService, db.statusManager, logger)
+	db.ttlServiceWrapper = NewTTLServiceWrapper(db.ttlService, db.statusManager)
 
 	if db.watchManager != nil {
-		db.watchManagerWrapper = NewWatchManagerWrapper(db.watchManager, db.statusManager, logger)
+		db.watchManagerWrapper = NewWatchManagerWrapper(db.watchManager, db.statusManager)
 	}
 
 	// 注册组件（按顺序注册，关闭时会按逆序关闭）

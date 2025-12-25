@@ -2,7 +2,6 @@ package nutsdb
 
 import (
 	"fmt"
-	"log"
 )
 
 // ComponentErrorHandler 组件错误处理接口
@@ -51,50 +50,14 @@ func (rs RecoveryStrategy) String() string {
 	}
 }
 
-// ComponentLogger 组件日志接口
-type ComponentLogger interface {
-	Errorf(format string, args ...interface{})
-	Warnf(format string, args ...interface{})
-	Infof(format string, args ...interface{})
-	Debugf(format string, args ...interface{})
-}
-
-// DefaultComponentLogger 默认日志实现
-type DefaultComponentLogger struct{}
-
-// Errorf 记录错误日志
-func (dl *DefaultComponentLogger) Errorf(format string, args ...interface{}) {
-	log.Printf("[ERROR] "+format, args...)
-}
-
-// Warnf 记录警告日志
-func (dl *DefaultComponentLogger) Warnf(format string, args ...interface{}) {
-	log.Printf("[WARN] "+format, args...)
-}
-
-// Infof 记录信息日志
-func (dl *DefaultComponentLogger) Infof(format string, args ...interface{}) {
-	// log.Printf("[INFO] "+format, args...)
-}
-
-// Debugf 记录调试日志
-func (dl *DefaultComponentLogger) Debugf(format string, args ...interface{}) {
-	// log.Printf("[DEBUG] "+format, args...)
-}
-
 // DefaultErrorHandler 默认错误处理器
 type DefaultErrorHandler struct {
-	logger       ComponentLogger
 	onFatalError func(error) // 致命错误回调
 }
 
 // NewDefaultErrorHandler 创建默认错误处理器
-func NewDefaultErrorHandler(logger ComponentLogger, onFatalError func(error)) *DefaultErrorHandler {
-	if logger == nil {
-		logger = &DefaultComponentLogger{}
-	}
+func NewDefaultErrorHandler(onFatalError func(error)) *DefaultErrorHandler {
 	return &DefaultErrorHandler{
-		logger:       logger,
 		onFatalError: onFatalError,
 	}
 }
@@ -106,7 +69,6 @@ func (deh *DefaultErrorHandler) HandleStartupError(component string, err error) 
 	}
 
 	wrappedErr := fmt.Errorf("component %s failed to start: %w", component, err)
-	deh.logger.Errorf("Startup error: %v", wrappedErr)
 
 	// 启动错误通常是致命的，触发回调
 	if deh.onFatalError != nil {
@@ -122,8 +84,6 @@ func (deh *DefaultErrorHandler) HandleRuntimeError(component string, err error) 
 		return
 	}
 
-	deh.logger.Errorf("Runtime error in component %s: %v", component, err)
-
 	// 运行时错误可能需要恢复策略，这里只记录
 	// 具体的恢复策略由调用者决定
 }
@@ -134,8 +94,7 @@ func (deh *DefaultErrorHandler) HandleShutdownError(component string, err error)
 		return
 	}
 
-	// 关闭错误不应阻止其他组件关闭，只记录警告
-	deh.logger.Warnf("Shutdown error in component %s: %v", component, err)
+	// 关闭错误不应阻止其他组件关闭
 }
 
 // ErrorWithRecovery 带恢复策略的错误

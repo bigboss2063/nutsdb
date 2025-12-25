@@ -19,21 +19,13 @@ type TTLServiceWrapper struct {
 	running atomic.Bool
 	ctx     context.Context
 	cancel  context.CancelFunc
-
-	// 日志
-	logger ComponentLogger
 }
 
 // NewTTLServiceWrapper 创建新的 TTLServiceWrapper
-func NewTTLServiceWrapper(service *ttl.Service, sm *StatusManager, logger ComponentLogger) *TTLServiceWrapper {
-	if logger == nil {
-		logger = &DefaultComponentLogger{}
-	}
-
+func NewTTLServiceWrapper(service *ttl.Service, sm *StatusManager) *TTLServiceWrapper {
 	return &TTLServiceWrapper{
 		service:       service,
 		statusManager: sm,
-		logger:        logger,
 	}
 }
 
@@ -49,8 +41,6 @@ func (tw *TTLServiceWrapper) Start(ctx context.Context) error {
 		return fmt.Errorf("TTLService already running")
 	}
 
-	tw.logger.Infof("TTLService starting")
-
 	// 创建 context
 	tw.ctx, tw.cancel = context.WithCancel(ctx)
 
@@ -64,8 +54,6 @@ func (tw *TTLServiceWrapper) Start(ctx context.Context) error {
 	// 标记为运行状态
 	tw.running.Store(true)
 
-	tw.logger.Infof("TTLService started successfully")
-
 	return nil
 }
 
@@ -74,11 +62,8 @@ func (tw *TTLServiceWrapper) Start(ctx context.Context) error {
 // 实现 Component 接口
 func (tw *TTLServiceWrapper) Stop(timeout time.Duration) error {
 	if !tw.running.Load() {
-		tw.logger.Infof("TTLService already stopped")
 		return nil
 	}
-
-	tw.logger.Infof("TTLService stopping")
 
 	// 取消 context，通知 TTL Service 停止
 	if tw.cancel != nil {
@@ -102,7 +87,6 @@ func (tw *TTLServiceWrapper) Stop(timeout time.Duration) error {
 		}
 
 		if time.Now().After(deadline) {
-			tw.logger.Warnf("TTLService stop timeout after %v", timeout)
 			break
 		}
 
@@ -114,8 +98,6 @@ func (tw *TTLServiceWrapper) Stop(timeout time.Duration) error {
 
 	// 标记为停止状态
 	tw.running.Store(false)
-
-	tw.logger.Infof("TTLService stopped successfully")
 
 	return nil
 }
