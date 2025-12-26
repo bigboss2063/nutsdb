@@ -29,8 +29,6 @@ type RecoveryStrategy int
 
 const (
 	RecoveryIgnore   RecoveryStrategy = iota // 忽略错误
-	RecoveryRetry                            // 重试操作
-	RecoveryRestart                          // 重启组件
 	RecoveryShutdown                         // 触发优雅关闭
 )
 
@@ -39,10 +37,6 @@ func (rs RecoveryStrategy) String() string {
 	switch rs {
 	case RecoveryIgnore:
 		return "Ignore"
-	case RecoveryRetry:
-		return "Retry"
-	case RecoveryRestart:
-		return "Restart"
 	case RecoveryShutdown:
 		return "Shutdown"
 	default:
@@ -95,42 +89,4 @@ func (deh *DefaultErrorHandler) HandleShutdownError(component string, err error)
 	}
 
 	// 关闭错误不应阻止其他组件关闭
-}
-
-// ErrorWithRecovery 带恢复策略的错误
-type ErrorWithRecovery struct {
-	Err      error
-	Strategy RecoveryStrategy
-	Context  map[string]interface{}
-}
-
-// Error 实现 error 接口
-func (ewr *ErrorWithRecovery) Error() string {
-	return fmt.Sprintf("%v (recovery: %s)", ewr.Err, ewr.Strategy)
-}
-
-// Unwrap 支持错误解包
-func (ewr *ErrorWithRecovery) Unwrap() error {
-	return ewr.Err
-}
-
-// NewErrorWithRecovery 创建带恢复策略的错误
-func NewErrorWithRecovery(err error, strategy RecoveryStrategy) *ErrorWithRecovery {
-	return &ErrorWithRecovery{
-		Err:      err,
-		Strategy: strategy,
-		Context:  make(map[string]interface{}),
-	}
-}
-
-// WithContext 添加上下文信息
-func (ewr *ErrorWithRecovery) WithContext(key string, value interface{}) *ErrorWithRecovery {
-	ewr.Context[key] = value
-	return ewr
-}
-
-// GetContext 获取上下文信息
-func (ewr *ErrorWithRecovery) GetContext(key string) (interface{}, bool) {
-	val, ok := ewr.Context[key]
-	return val, ok
 }

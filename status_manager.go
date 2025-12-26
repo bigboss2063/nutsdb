@@ -37,9 +37,6 @@ type StatusManager struct {
 	// 并发控制
 	wg sync.WaitGroup
 
-	// 状态转换日志
-	transitionLog *StateTransitionLog
-
 	// 配置
 	config StatusManagerConfig
 
@@ -67,12 +64,11 @@ func NewStatusManager(config StatusManagerConfig) *StatusManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	sm := &StatusManager{
-		componentNames:   make([]string, 0),
-		ctx:              ctx,
-		cancel:           cancel,
-		transitionLog:    NewStateTransitionLog(100),
-		config:           config,
-		errorHandler:     NewDefaultErrorHandler(nil),
+		componentNames: make([]string, 0),
+		ctx:            ctx,
+		cancel:         cancel,
+		config:         config,
+		errorHandler:   NewDefaultErrorHandler(nil),
 		shutdownProgress: nil,
 	}
 
@@ -100,17 +96,6 @@ func (sm *StatusManager) IsOperational() bool {
 // 组件应该使用此 context 监听关闭信号
 func (sm *StatusManager) Context() context.Context {
 	return sm.ctx
-}
-
-// GetComponentStatus 获取指定组件的状态
-func (sm *StatusManager) GetComponentStatus(name string) (ComponentStatus, error) {
-	value, exists := sm.components.Load(name)
-	if !exists {
-		return ComponentStatusStopped, fmt.Errorf("component %s not found", name)
-	}
-
-	wrapper := value.(*ComponentWrapper)
-	return wrapper.GetStatus(), nil
 }
 
 // String 返回状态的字符串表示
@@ -150,7 +135,6 @@ func (sm *StatusManager) RegisterComponent(name string, component Component) err
 }
 
 // getComponentWrapper 获取组件包装器（内部使用）
-// 优化：使用 sync.Map 避免锁竞争
 func (sm *StatusManager) getComponentWrapper(name string) (*ComponentWrapper, error) {
 	value, exists := sm.components.Load(name)
 	if !exists {
@@ -161,7 +145,6 @@ func (sm *StatusManager) getComponentWrapper(name string) (*ComponentWrapper, er
 }
 
 // getAllComponents 获取所有组件名称（内部使用）
-// 优化：直接返回预先存储的组件名称列表
 func (sm *StatusManager) getAllComponents() []string {
 	sm.componentsMu.RLock()
 	defer sm.componentsMu.RUnlock()
@@ -173,37 +156,17 @@ func (sm *StatusManager) getAllComponents() []string {
 }
 
 // transitionTo 执行状态转换
-// 验证状态转换的有效性，记录转换日志
-func (sm *StatusManager) transitionTo(toState Status, reason string) error {
+// 验证状态转换的有效性
+func (sm *StatusManager) transitionTo(toState Status) error {
 	fromState := sm.Status()
 
 	// 验证状态转换的有效性
 	if !sm.isValidTransition(fromState, toState) {
-		err := fmt.Errorf("invalid state transition from %s to %s", fromState, toState)
-		sm.transitionLog.Record(StateTransition{
-			FromState: fromState,
-			ToState:   toState,
-			Timestamp: time.Now(),
-			Reason:    reason,
-			Success:   false,
-			Error:     err,
-		})
-		return err
+		return fmt.Errorf("invalid state transition from %s to %s", fromState, toState)
 	}
 
 	// 执行状态转换
 	sm.state.Store(toState)
-
-	// 记录成功的状态转换
-	sm.transitionLog.Record(StateTransition{
-		FromState: fromState,
-		ToState:   toState,
-		Timestamp: time.Now(),
-		Reason:    reason,
-		Success:   true,
-		Error:     nil,
-	})
-
 	return nil
 }
 
@@ -226,16 +189,6 @@ func (sm *StatusManager) isValidTransition(from, to Status) bool {
 	default:
 		return false
 	}
-}
-
-// GetStateTransitionLog 获取状态转换日志
-func (sm *StatusManager) GetStateTransitionLog() *StateTransitionLog {
-	return sm.transitionLog
-}
-
-// GetRecentTransitions 获取最近的 n 条状态转换记录
-func (sm *StatusManager) GetRecentTransitions(n int) []StateTransition {
-	return sm.transitionLog.GetRecent(n)
 }
 
 // Start 启动所有注册的组件
@@ -267,7 +220,6 @@ func (sm *StatusManager) Start() error {
 		// 启动组件
 		if err := component.Start(sm.ctx); err != nil {
 			wrapper.SetStatus(ComponentStatusFailed)
-			wrapper.SetLastError(err)
 
 			// 处理启动错误
 			wrappedErr := sm.errorHandler.HandleStartupError(name, err)
@@ -280,17 +232,11 @@ func (sm *StatusManager) Start() error {
 
 		// 标记组件为运行状态
 		wrapper.SetStatus(ComponentStatusRunning)
-		wrapper.SetStartTime(time.Now())
 		startedComponents = append(startedComponents, name)
 	}
 
 	// 所有组件启动成功，转换到 Open 状态
-	if err := sm.transitionTo(StatusOpen, "all components started successfully"); err != nil {
-		sm.rollbackStartup(startedComponents)
-		return err
-	}
-
-	return nil
+	return sm.transitionTo(StatusOpen)
 }
 
 // rollbackStartup 回滚已启动的组件
@@ -310,10 +256,8 @@ func (sm *StatusManager) rollbackStartup(startedComponents []string) {
 		// 使用较短的超时时间进行回滚
 		if err := component.Stop(5 * time.Second); err != nil {
 			wrapper.SetStatus(ComponentStatusFailed)
-			wrapper.SetLastError(err)
 		} else {
 			wrapper.SetStatus(ComponentStatusStopped)
-			wrapper.SetStopTime(time.Now())
 		}
 	}
 }
@@ -338,7 +282,7 @@ func (sm *StatusManager) Close() error {
 	}
 
 	// Transition to Closing state while holding the lock
-	if err := sm.transitionTo(StatusClosing, "Close() called"); err != nil {
+	if err := sm.transitionTo(StatusClosing); err != nil {
 		sm.componentsMu.Unlock()
 		return err
 	}
@@ -382,7 +326,7 @@ func (sm *StatusManager) Close() error {
 	sm.wg.Wait()
 
 	// 转换到 Closed 状态
-	sm.transitionTo(StatusClosed, "all components stopped")
+	sm.transitionTo(StatusClosed)
 
 	return nil
 }
@@ -413,15 +357,12 @@ func (sm *StatusManager) shutdownComponents(order []string) {
 		}
 
 		// Always try to stop the component - Stop() should be idempotent
-		// This handles cases where components are registered after Start() and started manually
 		if err := component.Stop(remainingTimeout); err != nil {
 			wrapper.SetStatus(ComponentStatusFailed)
-			wrapper.SetLastError(err)
 			sm.errorHandler.HandleShutdownError(name, err)
 			sm.shutdownProgress.AddFailedComponent(name)
 		} else {
 			wrapper.SetStatus(ComponentStatusStopped)
-			wrapper.SetStopTime(time.Now())
 		}
 
 		sm.shutdownProgress.IncrementStopped()
@@ -453,43 +394,6 @@ func (sm *StatusManager) waitForClosed() error {
 // Returns nil if shutdown has not started yet
 func (sm *StatusManager) GetShutdownProgress() *ShutdownProgress {
 	return sm.shutdownProgress
-}
-
-// GetSystemHealth 获取系统整体健康状态
-// 优化：避免持有锁时执行健康检查
-func (sm *StatusManager) GetSystemHealth() *SystemHealth {
-	health := NewSystemHealth(sm.Status())
-
-	// 收集所有组件信息
-	sm.components.Range(func(key, value interface{}) bool {
-		name := key.(string)
-		wrapper := value.(*ComponentWrapper)
-		status := wrapper.GetStatus()
-
-		componentHealth := HealthStatus{
-			ComponentName: name,
-			Status:        status,
-			Healthy:       status == ComponentStatusRunning,
-			LastCheck:     time.Now(),
-			LastError:     nil,
-			Uptime:        wrapper.GetUptime(),
-			Metadata:      make(map[string]interface{}),
-		}
-
-		// 添加额外的元数据
-		componentHealth.Metadata["start_time"] = wrapper.GetStartTime()
-		if !wrapper.GetStopTime().IsZero() {
-			componentHealth.Metadata["stop_time"] = wrapper.GetStopTime()
-		}
-		if lastErr := wrapper.GetLastError(); lastErr != nil {
-			componentHealth.Metadata["last_error"] = lastErr.Error()
-		}
-
-		health.AddComponentHealth(componentHealth)
-		return true
-	})
-
-	return health
 }
 
 // Add 添加 delta 到 WaitGroup 计数器

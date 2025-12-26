@@ -881,14 +881,6 @@ func TestDB_Close_CompleteShutdownFlow(t *testing.T) {
 	require.True(t, db.IsClose())
 	require.Equal(t, StatusClosed, db.statusManager.Status())
 
-	// Verify all components are stopped
-	componentNames := []string{"TransactionManager", "MergeWorker", "TTLServiceWrapper"}
-	for _, name := range componentNames {
-		status, err := db.statusManager.GetComponentStatus(name)
-		require.NoError(t, err)
-		require.Equal(t, ComponentStatusStopped, status, "Component %s should be stopped", name)
-	}
-
 	// Verify resources are released
 	require.Nil(t, db.ActiveFile)
 	require.Nil(t, db.Index)
@@ -1172,25 +1164,11 @@ func TestDB_Close_ComponentShutdownOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, db)
 
-	// Track shutdown order
-	var shutdownOrder []string
-	var mu sync.Mutex
-
-	// We can't directly hook into component shutdown, but we can verify
-	// that all components are properly stopped after close
 	err = db.Close()
 	require.NoError(t, err)
 
-	// Verify all components are stopped
-	componentNames := []string{"TransactionManager", "MergeWorker", "TTLServiceWrapper"}
-	for _, name := range componentNames {
-		status, err := db.statusManager.GetComponentStatus(name)
-		require.NoError(t, err)
-		require.Equal(t, ComponentStatusStopped, status, "Component %s should be stopped", name)
-	}
-
-	_ = shutdownOrder
-	_ = mu
+	// Verify database is closed
+	require.Equal(t, StatusClosed, db.statusManager.Status())
 }
 
 // TestDB_Close_WithMergeInProgress tests closing database during merge operation

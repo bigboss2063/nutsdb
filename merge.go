@@ -16,11 +16,13 @@ package nutsdb
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/nutsdb/nutsdb/internal/core"
@@ -489,4 +491,224 @@ func (db *DB) isPendingListEntry(entry *core.Entry) bool {
 type mergedEntryInfo struct {
 	entry    *core.Entry
 	bucketId core.BucketId
+}
+
+// mergeWorker manages data file merge operations
+// Implements Component interface for lifecycle management
+type mergeWorker struct {
+	db            *DB
+	statusManager *StatusManager
+
+	// merge control
+	mergeStartCh chan struct{}
+	mergeEndCh   chan error
+	isMerging    atomic.Bool
+
+	// timer
+	ticker *time.Ticker
+
+	// config
+	config MergeConfig
+
+	// runtime control
+	ctx    context.Context
+	cancel context.CancelFunc
+	doneCh chan struct{}
+}
+
+// MergeConfig merge configuration
+type MergeConfig struct {
+	MergeInterval   time.Duration // auto merge interval, 0 = disabled
+	EnableAutoMerge bool          // enable auto merge
+}
+
+// DefaultMergeConfig returns default merge config
+func DefaultMergeConfig() MergeConfig {
+	return MergeConfig{
+		MergeInterval:   0,
+		EnableAutoMerge: false,
+	}
+}
+
+// newMergeWorker creates a new mergeWorker
+func newMergeWorker(db *DB, sm *StatusManager, config MergeConfig) *mergeWorker {
+	return &mergeWorker{
+		db:            db,
+		statusManager: sm,
+		mergeStartCh:  make(chan struct{}),
+		mergeEndCh:    make(chan error, 1),
+		config:        config,
+		doneCh:        make(chan struct{}),
+	}
+}
+
+// Name returns component name
+func (mw *mergeWorker) Name() string {
+	return "MergeWorker"
+}
+
+// Start starts the mergeWorker
+// Implements Component interface
+func (mw *mergeWorker) Start(ctx context.Context) error {
+	// create context
+	mw.ctx, mw.cancel = context.WithCancel(ctx)
+
+	// initialize timer
+	if mw.config.EnableAutoMerge && mw.config.MergeInterval > 0 {
+		mw.ticker = time.NewTicker(mw.config.MergeInterval)
+	} else {
+		mw.ticker = time.NewTicker(math.MaxInt64)
+		mw.ticker.Stop()
+	}
+
+	// start worker goroutine
+	mw.statusManager.Add(1)
+	go mw.run()
+
+	return nil
+}
+
+// Stop stops the mergeWorker
+// Waits for current merge to complete or timeout
+// Implements Component interface
+func (mw *mergeWorker) Stop(timeout time.Duration) error {
+	// cancel context, signal worker to stop
+	if mw.cancel != nil {
+		mw.cancel()
+	}
+
+	// stop timer
+	if mw.ticker != nil {
+		mw.ticker.Stop()
+	}
+
+	// wait for worker goroutine to complete or timeout
+	select {
+	case <-mw.doneCh:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("mergeWorker stop timeout")
+	}
+}
+
+// TriggerMerge manually triggers a merge operation
+// Returns ErrDBClosed if database is closing or closed
+func (mw *mergeWorker) TriggerMerge() error {
+	// check database status
+	status := mw.statusManager.Status()
+	if status == StatusClosing || status == StatusClosed {
+		return ErrDBClosed
+	}
+
+	// check if already merging
+	if mw.isMerging.Load() {
+		return ErrIsMerging
+	}
+
+	// send merge request
+	select {
+	case mw.mergeStartCh <- struct{}{}:
+		// wait for merge to complete
+		return <-mw.mergeEndCh
+	case <-mw.ctx.Done():
+		return ErrDBClosed
+	}
+}
+
+// IsMerging returns whether a merge is in progress
+func (mw *mergeWorker) IsMerging() bool {
+	return mw.isMerging.Load()
+}
+
+// run is the main loop for mergeWorker
+// Listens for merge requests and timer events
+func (mw *mergeWorker) run() {
+	defer mw.statusManager.Done()
+	defer close(mw.doneCh)
+
+	for {
+		select {
+		case <-mw.ctx.Done():
+			// received close signal, exit loop
+			return
+
+		case <-mw.mergeStartCh:
+			// received manual merge request
+
+			// check close signal before starting merge
+			select {
+			case <-mw.ctx.Done():
+				return
+			default:
+			}
+
+			// perform merge
+			err := mw.performMerge()
+
+			// send merge result (non-blocking)
+			select {
+			case mw.mergeEndCh <- err:
+			default:
+			}
+
+			// if auto merge is enabled, reset timer
+			if mw.config.EnableAutoMerge && mw.config.MergeInterval > 0 {
+				mw.ticker.Reset(mw.config.MergeInterval)
+			}
+
+		case <-mw.ticker.C:
+			// timer triggered auto merge
+
+			// check close signal before starting merge
+			select {
+			case <-mw.ctx.Done():
+				return
+			default:
+			}
+
+			// perform merge (ignore errors for auto merge)
+			_ = mw.performMerge()
+		}
+	}
+}
+
+// performMerge performs the actual merge operation
+func (mw *mergeWorker) performMerge() error {
+	// check database status
+	status := mw.statusManager.Status()
+	if status == StatusClosing || status == StatusClosed {
+		return ErrDBClosed
+	}
+
+	// set merging flag atomically
+	if !mw.isMerging.CompareAndSwap(false, true) {
+		return ErrIsMerging
+	}
+	defer mw.isMerging.Store(false)
+
+	// perform merge
+	return mw.db.merge()
+}
+
+// SetMergeInterval sets the merge interval
+// If interval > 0, enables auto merge; otherwise disables
+func (mw *mergeWorker) SetMergeInterval(interval time.Duration) {
+	mw.config.MergeInterval = interval
+
+	if interval > 0 {
+		mw.config.EnableAutoMerge = true
+		if mw.ticker != nil {
+			mw.ticker.Reset(interval)
+		}
+	} else {
+		mw.config.EnableAutoMerge = false
+		if mw.ticker != nil {
+			mw.ticker.Stop()
+		}
+	}
+}
+
+// GetMergeInterval returns the merge interval
+func (mw *mergeWorker) GetMergeInterval() time.Duration {
+	return mw.config.MergeInterval
 }

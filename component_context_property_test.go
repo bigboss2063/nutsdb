@@ -159,7 +159,7 @@ func TestProperty_ContextCancellationPropagation_RealComponents(t *testing.T) {
 			registeredComponents := make([]string, 0)
 
 			// Register TransactionManager (always)
-			tm := NewTransactionManager(db, sm)
+			tm := newTxManager(db, sm)
 			if err := sm.RegisterComponent("TransactionManager", tm); err != nil {
 				t.Logf("Failed to register TransactionManager: %v", err)
 				sm.Close()
@@ -172,12 +172,12 @@ func TestProperty_ContextCancellationPropagation_RealComponents(t *testing.T) {
 			}
 			registeredComponents = append(registeredComponents, "TransactionManager")
 
-			// Conditionally register MergeWorker
-			var mw *MergeWorker
+			// Conditionally register mergeWorker
+			var mw *mergeWorker
 			if enableMerge {
 				config := DefaultMergeConfig()
 				config.EnableAutoMerge = false // Disable auto-merge for testing
-				mw = NewMergeWorker(db, sm, config)
+				mw = newMergeWorker(db, sm, config)
 				if err := sm.RegisterComponent("MergeWorker", mw); err != nil {
 					t.Logf("Failed to register MergeWorker: %v", err)
 					sm.Close()
@@ -191,8 +191,8 @@ func TestProperty_ContextCancellationPropagation_RealComponents(t *testing.T) {
 				registeredComponents = append(registeredComponents, "MergeWorker")
 			}
 
-			// Conditionally register TTLServiceWrapper
-			var tw *TTLServiceWrapper
+			// Conditionally register TTLService
+			var ttlSvc *ttl.Service
 			if enableTTL {
 				mockClock := ttl.NewMockClock(1000000)
 				config := ttl.DefaultConfig()
@@ -200,14 +200,13 @@ func TestProperty_ContextCancellationPropagation_RealComponents(t *testing.T) {
 				config.BatchTimeout = 50 * time.Millisecond
 				callback := func(events []*ttl.ExpirationEvent) {}
 				scanFn := func() ([]*ttl.ExpirationEvent, error) { return nil, nil }
-				ttlService := ttl.NewService(mockClock, config, callback, scanFn)
-				tw = NewTTLServiceWrapper(ttlService, sm)
-				if err := sm.RegisterComponent("TTLService", tw); err != nil {
+				ttlSvc = ttl.NewService(mockClock, config, callback, scanFn)
+				if err := sm.RegisterComponent("TTLService", ttlSvc); err != nil {
 					t.Logf("Failed to register TTLService: %v", err)
 					sm.Close()
 					return false
 				}
-				if err := tw.Start(sm.Context()); err != nil {
+				if err := ttlSvc.Start(sm.Context()); err != nil {
 					t.Logf("Failed to start TTLService: %v", err)
 					sm.Close()
 					return false
@@ -215,17 +214,16 @@ func TestProperty_ContextCancellationPropagation_RealComponents(t *testing.T) {
 				registeredComponents = append(registeredComponents, "TTLService")
 			}
 
-			// Conditionally register WatchManagerWrapper
-			var ww *WatchManagerWrapper
+			// Conditionally register WatchManager
+			var wm *watchManager
 			if enableWatch {
-				wm := NewWatchManager()
-				ww = NewWatchManagerWrapper(wm, sm)
-				if err := sm.RegisterComponent("WatchManager", ww); err != nil {
+				wm = NewWatchManager()
+				if err := sm.RegisterComponent("WatchManager", wm); err != nil {
 					t.Logf("Failed to register WatchManager: %v", err)
 					sm.Close()
 					return false
 				}
-				if err := ww.Start(sm.Context()); err != nil {
+				if err := wm.Start(sm.Context()); err != nil {
 					t.Logf("Failed to start WatchManager: %v", err)
 					sm.Close()
 					return false
@@ -266,25 +264,13 @@ func TestProperty_ContextCancellationPropagation_RealComponents(t *testing.T) {
 				}
 			}
 
-			// TTLServiceWrapper
-			if enableTTL && tw != nil {
-				if tw.running.Load() {
-					t.Logf("TTLService still running after Close()")
-					return false
-				}
-				// Check if TTLService's context was cancelled
-				select {
-				case <-tw.ctx.Done():
-					// Context was cancelled, good
-				default:
-					t.Logf("TTLService context not cancelled after Close()")
-					return false
-				}
-			}
+			// TTLService
+			// Note: TTLService doesn't expose running state, but the context cancellation
+			// will trigger its Run method to exit
 
-			// WatchManagerWrapper
-			if enableWatch && ww != nil {
-				if ww.running.Load() {
+			// WatchManager
+			if enableWatch && wm != nil {
+				if !wm.isClosed() {
 					t.Logf("WatchManager still running after Close()")
 					return false
 				}

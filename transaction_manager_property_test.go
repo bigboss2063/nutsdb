@@ -43,7 +43,7 @@ func TestProperty_ActiveTransactionCompletionGuarantee(t *testing.T) {
 			}
 			defer sm.Close()
 
-			tm := NewTransactionManager(db, sm)
+			tm := newTxManager(db, sm)
 			ctx := context.Background()
 			if err := tm.Start(ctx); err != nil {
 				t.Logf("Failed to start TransactionManager: %v", err)
@@ -174,7 +174,7 @@ func TestProperty_ActiveTransactionCompletionGuarantee_WithTimeout(t *testing.T)
 			}
 			defer sm.Close()
 
-			tm := NewTransactionManager(db, sm)
+			tm := newTxManager(db, sm)
 			ctx := context.Background()
 			if err := tm.Start(ctx); err != nil {
 				t.Logf("Failed to start TransactionManager: %v", err)
@@ -282,7 +282,7 @@ func TestProperty_TransactionRejectionDuringShutdown(t *testing.T) {
 				return false
 			}
 
-			tm := NewTransactionManager(db, sm)
+			tm := newTxManager(db, sm)
 
 			// 注册 TransactionManager 作为组件，这样 StatusManager.Close() 会自动调用 tm.Stop()
 			if err := sm.RegisterComponent("TransactionManager", tm); err != nil {
@@ -412,7 +412,7 @@ func TestProperty_TransactionRejectionDuringShutdown_ImmediateRejection(t *testi
 				return false
 			}
 
-			tm := NewTransactionManager(db, sm)
+			tm := newTxManager(db, sm)
 
 			// 注册 TransactionManager 作为组件
 			if err := sm.RegisterComponent("TransactionManager", tm); err != nil {
@@ -525,7 +525,7 @@ func TestProperty_TransactionRejectionDuringShutdown_ClosedState(t *testing.T) {
 				return false
 			}
 
-			tm := NewTransactionManager(db, sm)
+			tm := newTxManager(db, sm)
 
 			// 注册 TransactionManager 作为组件
 			if err := sm.RegisterComponent("TransactionManager", tm); err != nil {
@@ -599,7 +599,7 @@ func TestProperty_ActiveTransactionCompletionGuarantee_ConcurrentCompletion(t *t
 			}
 			defer sm.Close()
 
-			tm := NewTransactionManager(db, sm)
+			tm := newTxManager(db, sm)
 			ctx := context.Background()
 			if err := tm.Start(ctx); err != nil {
 				t.Logf("Failed to start TransactionManager: %v", err)

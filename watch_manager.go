@@ -3,6 +3,7 @@ package nutsdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -120,6 +121,7 @@ type watchManager struct {
 	closed      atomic.Bool
 	mu          sync.Mutex
 	idGenerator *IDGenerator
+	started     chan struct{} // signal when distributor is ready
 }
 
 func NewWatchManager() *watchManager {
@@ -135,7 +137,13 @@ func NewWatchManager() *watchManager {
 		idGenerator:    &IDGenerator{currentMaxId: 0},
 		victimMaps:     make(victimBucketToSubscribers),
 		victimChan:     make(victimBucketChan, victimBucketBufferSize),
+		started:        make(chan struct{}),
 	}
+}
+
+// Name returns the component name
+func (wm *watchManager) Name() string {
+	return "WatchManager"
 }
 
 // send a message to the watch manager
@@ -584,4 +592,63 @@ func (wm *watchManager) deleteBucket(deletingMessageBucket Message) {
 			return
 		}
 	}
+}
+
+// Start starts the watch manager
+// Implements Component interface
+func (wm *watchManager) Start(ctx context.Context) error {
+	if wm.closed.Load() {
+		return ErrWatchManagerClosed
+	}
+
+	// start distributor goroutine
+	wm.wg.Add(1)
+	go func() {
+		defer wm.wg.Done()
+		// signal that distributor goroutine has started
+		close(wm.started)
+		wm.startDistributor()
+	}()
+
+	// wait for distributor goroutine to start before returning
+	select {
+	case <-wm.started:
+		// distributor goroutine has started
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timeout waiting for watch manager distributor to start")
+	}
+
+	return nil
+}
+
+// Stop stops the watch manager
+// Notifies all subscribers that the database is closing and closes all subscription channels
+// Implements Component interface
+func (wm *watchManager) Stop(timeout time.Duration) error {
+	if wm.closed.Load() {
+		return nil
+	}
+
+	// close watch manager
+	// this cancels context and signals all goroutines to stop
+	wm.close()
+
+	// wait for watch manager to complete cleanup
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if wm.isClosed() {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+
+		<-ticker.C
+	}
+
+	return nil
 }

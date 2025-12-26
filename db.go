@@ -62,8 +62,8 @@ type (
 		mu                      sync.RWMutex
 		KeyCount                int                 // total key number ,include expired, deleted, repeated.
 		statusManager           *StatusManager      // 状态管理器
-		transactionManager      *TransactionManager // 事务管理器
-		mergeWorker             *MergeWorker        // Merge 工作器
+		transactionManager      *txManager          // 事务管理器
+		mergeWorker             *mergeWorker        // Merge 工作器
 		isMerging               int32               // atomic flag to indicate merge is in progress
 		fm                      *FileManager
 		flock                   *flock.Flock
@@ -73,8 +73,6 @@ type (
 		mergeWorkCloseCh        chan struct{}
 		writeCh                 chan *request
 		ttlService              *ttl.Service
-		ttlServiceWrapper       *TTLServiceWrapper   // TTL Service 包装器
-		watchManagerWrapper     *WatchManagerWrapper // Watch Manager 包装器
 		RecordCount             int64                // current valid record count, exclude deleted, repeated
 		bucketManager           *BucketManager
 		hintKeyAndRAMIdxModeLru *utils.LRUCache // lru cache for HintKeyAndRAMIdxMode
@@ -184,20 +182,14 @@ func open(opt Options) (*DB, error) {
 	db.statusManager = NewStatusManager(smConfig)
 
 	// 创建组件包装器，从 Options 中读取配置
-	db.transactionManager = NewTransactionManager(db, db.statusManager)
+	db.transactionManager = newTxManager(db, db.statusManager)
 
-	// 配置 MergeWorker
+	// 配置 mergeWorker
 	mergeConfig := MergeConfig{
 		MergeInterval:   opt.MergeInterval,
 		EnableAutoMerge: opt.MergeInterval > 0, // 如果设置了间隔，启用自动合并
 	}
-	db.mergeWorker = NewMergeWorker(db, db.statusManager, mergeConfig)
-
-	db.ttlServiceWrapper = NewTTLServiceWrapper(db.ttlService, db.statusManager)
-
-	if db.watchManager != nil {
-		db.watchManagerWrapper = NewWatchManagerWrapper(db.watchManager, db.statusManager)
-	}
+	db.mergeWorker = newMergeWorker(db, db.statusManager, mergeConfig)
 
 	// 注册组件（按顺序注册，关闭时会按逆序关闭）
 	// 1. TransactionManager
@@ -210,15 +202,15 @@ func open(opt Options) (*DB, error) {
 		return nil, fmt.Errorf("failed to register MergeWorker: %w", err)
 	}
 
-	// 3. TTLServiceWrapper
-	if err := db.statusManager.RegisterComponent("TTLServiceWrapper", db.ttlServiceWrapper); err != nil {
-		return nil, fmt.Errorf("failed to register TTLServiceWrapper: %w", err)
+	// 3. TTLService
+	if err := db.statusManager.RegisterComponent("TTLService", db.ttlService); err != nil {
+		return nil, fmt.Errorf("failed to register TTLService: %w", err)
 	}
 
-	// 4. WatchManagerWrapper（如果启用）
-	if db.watchManagerWrapper != nil {
-		if err := db.statusManager.RegisterComponent("WatchManagerWrapper", db.watchManagerWrapper); err != nil {
-			return nil, fmt.Errorf("failed to register WatchManagerWrapper: %w", err)
+	// 4. WatchManager（如果启用）
+	if db.watchManager != nil {
+		if err := db.statusManager.RegisterComponent("WatchManager", db.watchManager); err != nil {
+			return nil, fmt.Errorf("failed to register WatchManager: %w", err)
 		}
 	}
 
@@ -343,7 +335,9 @@ func (db *DB) release() error {
 
 	// Close TTL service first to stop the scanner goroutine
 	if db.ttlService != nil {
-		db.ttlService.Close()
+		if err := db.ttlService.Stop(5 * time.Second); err != nil {
+			log.Printf("TTLService stop error: %v", err)
+		}
 	}
 
 	// Signal merge worker to stop after TTL service is closed

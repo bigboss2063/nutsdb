@@ -16,7 +16,9 @@ package ttl
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,6 +48,8 @@ type Service struct {
 	queue           *expirationQueue     // Queue for expiration events
 	batchSize       int                  // Batch size for processing expiration events
 	batchTimeout    time.Duration        // Timeout for processing expiration events
+	wg              sync.WaitGroup       // WaitGroup for background goroutines
+	started         atomic.Bool          // Tracks if service has started
 }
 
 // NewService creates a TTL service with the specified clock and configuration.
@@ -89,20 +93,19 @@ func NewService(clk Clock, config Config, callback BatchExpiredCallback, scanFn 
 // Run starts the TTL service with periodic scanning.
 // The scanFn is called each scan cycle to perform the scan within a transaction.
 func (s *Service) Run(ctx context.Context) {
-	var wg sync.WaitGroup
-	wg.Add(2)
+	s.wg.Add(2)
 
 	go func() {
-		defer wg.Done()
+		defer s.wg.Done()
 		s.processExpirationEvents(ctx)
 	}()
 
 	go func() {
-		defer wg.Done()
+		defer s.wg.Done()
 		s.scanner.Run(ctx, s.scanFn)
 	}()
 
-	wg.Wait()
+	s.wg.Wait()
 }
 
 // Close stops the TTL service and releases all resources.
@@ -189,4 +192,41 @@ func (s *Service) processExpirationEvents(ctx context.Context) {
 			timer.Reset(s.batchTimeout)
 		}
 	}
+}
+
+// Start starts the TTL service with periodic scanning.
+// Implements component lifecycle.
+func (s *Service) Start(ctx context.Context) error {
+	s.started.Store(true)
+	go s.Run(ctx)
+	return nil
+}
+
+// Stop stops the TTL service and releases all resources.
+// Implements component lifecycle.
+func (s *Service) Stop(timeout time.Duration) error {
+	// Close the queue to signal shutdown
+	s.queue.close()
+
+	// Wait for background goroutines to finish if service was started
+	if s.started.Load() {
+		done := make(chan struct{})
+		go func() {
+			s.wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(timeout):
+			return fmt.Errorf("TTLService stop timeout")
+		}
+	}
+
+	return nil
+}
+
+// Name returns the component name.
+func (s *Service) Name() string {
+	return "TTLService"
 }

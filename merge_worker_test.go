@@ -42,7 +42,7 @@ func TestMergeWorker_StartStop(t *testing.T) {
 	}()
 
 	config := DefaultMergeConfig()
-	mw := NewMergeWorker(db, sm, config)
+	mw := newMergeWorker(db, sm, config)
 
 	// Test starting
 	ctx := context.Background()
@@ -125,14 +125,14 @@ func TestMergeWorker_RejectMergeWhenClosing(t *testing.T) {
 
 	// Test 2: Simulate Closing state by transitioning StatusManager
 	// This tests that MergeWorker checks the status before accepting merge requests
-	db.statusManager.transitionTo(StatusClosing, "test closing")
+	db.statusManager.transitionTo(StatusClosing)
 
 	// Trigger merge in Closing state - should fail with ErrDBClosed
 	err = db.mergeWorker.TriggerMerge()
 	require.Equal(t, ErrDBClosed, err, "Expected ErrDBClosed when triggering merge in Closing state")
 
 	// Test 3: Simulate Closed state
-	db.statusManager.transitionTo(StatusClosed, "test closed")
+	db.statusManager.transitionTo(StatusClosed)
 
 	// Trigger merge in Closed state - should also fail with ErrDBClosed
 	err = db.mergeWorker.TriggerMerge()
@@ -141,11 +141,9 @@ func TestMergeWorker_RejectMergeWhenClosing(t *testing.T) {
 	// Clean up: manually stop components since we bypassed normal Close()
 	db.mergeWorker.Stop(5 * time.Second)
 	db.transactionManager.Stop(5 * time.Second)
-	if db.ttlServiceWrapper != nil {
-		db.ttlServiceWrapper.Stop(5 * time.Second)
-	}
-	if db.watchManagerWrapper != nil {
-		db.watchManagerWrapper.Stop(5 * time.Second)
+	db.ttlService.Stop(5 * time.Second)
+	if db.watchManager != nil {
+		db.watchManager.Stop(5 * time.Second)
 	}
 }
 
@@ -499,7 +497,7 @@ func TestMergeWorker_StopTimeout(t *testing.T) {
 	}()
 
 	config := DefaultMergeConfig()
-	mw := NewMergeWorker(db, sm, config)
+	mw := newMergeWorker(db, sm, config)
 
 	ctx := context.Background()
 	require.NoError(t, mw.Start(ctx))

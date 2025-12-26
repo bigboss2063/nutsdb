@@ -15,7 +15,7 @@ func TestTransactionManager_Creation(t *testing.T) {
 	sm := NewStatusManager(DefaultStatusManagerConfig())
 	defer sm.Close()
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 
 	if tm == nil {
 		t.Fatal("Expected non-nil TransactionManager")
@@ -40,7 +40,7 @@ func TestTransactionManager_StartStop(t *testing.T) {
 	sm := NewStatusManager(DefaultStatusManagerConfig())
 	defer sm.Close()
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 
 	// 测试启动
 	ctx := context.Background()
@@ -83,7 +83,7 @@ func TestTransactionManager_RegisterUnregisterTx(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 	ctx := context.Background()
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Failed to start TransactionManager: %v", err)
@@ -141,7 +141,7 @@ func TestTransactionManager_RegisterNilTx(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 	ctx := context.Background()
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Failed to start TransactionManager: %v", err)
@@ -165,7 +165,7 @@ func TestTransactionManager_RejectTxWhenClosing(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 	ctx := context.Background()
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Failed to start TransactionManager: %v", err)
@@ -178,7 +178,7 @@ func TestTransactionManager_RejectTxWhenClosing(t *testing.T) {
 	}
 
 	// 模拟数据库进入 Closing 状态
-	sm.transitionTo(StatusClosing, "test closing")
+	sm.transitionTo(StatusClosing)
 
 	// 在 Closing 状态下，注册应该失败
 	tx2 := &Tx{id: 2, db: db}
@@ -192,7 +192,7 @@ func TestTransactionManager_RejectTxWhenClosing(t *testing.T) {
 	}
 
 	// 模拟数据库进入 Closed 状态
-	sm.transitionTo(StatusClosed, "test closed")
+	sm.transitionTo(StatusClosed)
 
 	// 在 Closed 状态下，注册也应该失败
 	tx3 := &Tx{id: 3, db: db}
@@ -215,7 +215,7 @@ func TestTransactionManager_RejectTxWhenNotRunning(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 
 	// TransactionManager 未启动时，RegisterTx 仍然可以工作
 	// 因为 RegisterTx 只检查 StatusManager 的状态，不检查 TransactionManager 是否运行
@@ -239,7 +239,7 @@ func TestTransactionManager_WaitForActiveTxs(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 	ctx := context.Background()
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Failed to start TransactionManager: %v", err)
@@ -311,7 +311,7 @@ func TestTransactionManager_WaitForActiveTxsTimeout(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 	ctx := context.Background()
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Failed to start TransactionManager: %v", err)
@@ -357,7 +357,7 @@ func TestTransactionManager_ConcurrentRegisterUnregister(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 	ctx := context.Background()
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Failed to start TransactionManager: %v", err)
@@ -418,7 +418,7 @@ func TestTransactionManager_MaxActiveTxs(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 	ctx := context.Background()
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Failed to start TransactionManager: %v", err)
@@ -462,7 +462,7 @@ func TestTransactionManager_StopWithActiveTxs(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 	ctx := context.Background()
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Failed to start TransactionManager: %v", err)
@@ -513,7 +513,7 @@ func TestTransactionManager_StopTimeout(t *testing.T) {
 		t.Fatalf("Failed to start StatusManager: %v", err)
 	}
 
-	tm := NewTransactionManager(db, sm)
+	tm := newTxManager(db, sm)
 	ctx := context.Background()
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Failed to start TransactionManager: %v", err)
