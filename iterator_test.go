@@ -16,12 +16,14 @@ package nutsdb
 
 import (
 	"testing"
+	"time"
 
 	"github.com/nutsdb/nutsdb/internal/testutils"
+	"github.com/nutsdb/nutsdb/internal/ttl"
 	"github.com/stretchr/testify/require"
 )
 
-func TestIterator(t *testing.T) {
+func TestIterator_Forward(t *testing.T) {
 	bucket := "bucket"
 
 	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
@@ -31,24 +33,27 @@ func TestIterator(t *testing.T) {
 			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
 		}
 
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+		require.NoError(t, db.View(func(tx *Tx) error {
+			it := NewIterator(tx, bucket, IteratorOptions{})
+			defer it.Close()
+			require.NoError(t, it.Err())
 
 			i := 0
+			var buf []byte
+			for it.Rewind(); it.Valid(); it.Next() {
+				item := it.Item()
+				require.NotNil(t, item)
+				require.Equal(t, testutils.GetTestBytes(i), item.Key())
 
-			for {
-				value, err := iterator.Value()
+				buf, err := item.ValueCopy(buf[:0])
 				require.NoError(t, err)
-				require.Equal(t, testutils.GetTestBytes(i), value)
-				if !iterator.Next() {
-					break
-				}
+				require.Equal(t, testutils.GetTestBytes(i), buf)
+
 				i++
 			}
-
+			require.Equal(t, 100, i)
 			return nil
-		})
+		}))
 	})
 }
 
@@ -62,23 +67,24 @@ func TestIterator_Reverse(t *testing.T) {
 			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
 		}
 
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: true})
-			defer iterator.Release()
+		require.NoError(t, db.View(func(tx *Tx) error {
+			it := NewIterator(tx, bucket, IteratorOptions{Reverse: true})
+			defer it.Close()
+			require.NoError(t, it.Err())
 
 			i := 99
-			for {
-				value, err := iterator.Value()
+			for it.Rewind(); it.Valid(); it.Next() {
+				item := it.Item()
+				require.NotNil(t, item)
+
+				val, err := item.ValueCopy(nil)
 				require.NoError(t, err)
-				require.Equal(t, testutils.GetTestBytes(i), value)
-				if !iterator.Next() {
-					break
-				}
+				require.Equal(t, testutils.GetTestBytes(i), val)
 				i--
 			}
-
+			require.Equal(t, -1, i)
 			return nil
-		})
+		}))
 	})
 }
 
@@ -92,269 +98,20 @@ func TestIterator_Seek(t *testing.T) {
 			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
 		}
 
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: true})
-			defer iterator.Release()
+		require.NoError(t, db.View(func(tx *Tx) error {
+			it := NewIterator(tx, bucket, IteratorOptions{})
+			defer it.Close()
+			require.NoError(t, it.Err())
 
-			iterator.Seek(testutils.GetTestBytes(40))
-
-			value, err := iterator.Value()
-			require.NoError(t, err)
-			require.Equal(t, testutils.GetTestBytes(40), value)
-
+			it.Seek(testutils.GetTestBytes(40))
+			require.True(t, it.Valid())
+			require.Equal(t, testutils.GetTestBytes(40), it.Item().Key())
 			return nil
-		})
+		}))
 	})
 }
 
-func TestIterator_Release(t *testing.T) {
-	bucket := "bucket"
-
-	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
-		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
-
-		for i := 0; i < 100; i++ {
-			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
-		}
-
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: true})
-			defer iterator.Release()
-			return nil
-		})
-
-		for i := 0; i < 100; i++ {
-			txDel(t, db, bucket, testutils.GetTestBytes(i), nil)
-		}
-	})
-}
-
-func TestIterator_Item(t *testing.T) {
-	bucket := "bucket"
-
-	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
-		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
-
-		for i := 0; i < 100; i++ {
-			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
-		}
-
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
-
-			i := 0
-			for iterator.Valid() {
-				item := iterator.Item()
-				require.NotNil(t, item)
-				require.NotNil(t, item.Key)
-				require.NotNil(t, item.Record)
-				require.Equal(t, testutils.GetTestBytes(i), item.Key)
-
-				i++
-				if !iterator.Next() {
-					break
-				}
-			}
-
-			require.Equal(t, 100, i)
-			return nil
-		})
-	})
-}
-
-func TestIterator_Rewind(t *testing.T) {
-	bucket := "bucket"
-
-	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
-		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
-
-		for i := 0; i < 50; i++ {
-			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
-		}
-
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
-
-			// Move to position 10
-			for i := 0; i < 10; i++ {
-				require.True(t, iterator.Valid())
-				iterator.Next()
-			}
-
-			// Rewind back to start
-			require.True(t, iterator.Rewind())
-			require.True(t, iterator.Valid())
-
-			// Verify we're at the first element
-			key := iterator.Key()
-			require.Equal(t, testutils.GetTestBytes(0), key)
-
-			return nil
-		})
-	})
-}
-
-func TestIterator_Rewind_Reverse(t *testing.T) {
-	bucket := "bucket"
-
-	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
-		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
-
-		for i := 0; i < 50; i++ {
-			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
-		}
-
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: true})
-			defer iterator.Release()
-
-			// Move backward 10 positions
-			for i := 0; i < 10; i++ {
-				require.True(t, iterator.Valid())
-				iterator.Next()
-			}
-
-			// Rewind back to the last element
-			require.True(t, iterator.Rewind())
-			require.True(t, iterator.Valid())
-
-			// Verify we're at the last element
-			key := iterator.Key()
-			require.Equal(t, testutils.GetTestBytes(49), key)
-
-			return nil
-		})
-	})
-}
-
-func TestIterator_EmptyBucket(t *testing.T) {
-	bucket := "empty_bucket"
-
-	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
-		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
-
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
-
-			require.False(t, iterator.Valid())
-			require.Nil(t, iterator.Key())
-			require.Nil(t, iterator.Item())
-
-			_, err := iterator.Value()
-			require.Error(t, err)
-			require.Equal(t, ErrKeyNotFound, err)
-
-			return nil
-		})
-	})
-}
-
-func TestIterator_NextAfterEnd(t *testing.T) {
-	bucket := "bucket"
-
-	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
-		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
-
-		for i := 0; i < 10; i++ {
-			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
-		}
-
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
-
-			// Move to the end
-			count := 0
-			for iterator.Valid() {
-				count++
-				if !iterator.Next() {
-					break
-				}
-			}
-			require.Equal(t, 10, count)
-
-			// Try to move beyond end
-			require.False(t, iterator.Valid())
-			require.False(t, iterator.Next())
-			require.False(t, iterator.Valid())
-
-			// Key and Item should return nil
-			require.Nil(t, iterator.Key())
-			require.Nil(t, iterator.Item())
-
-			return nil
-		})
-	})
-}
-
-func TestIterator_ValidConsistency(t *testing.T) {
-	bucket := "bucket"
-
-	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
-		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
-
-		for i := 0; i < 10; i++ {
-			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
-		}
-
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
-
-			// Multiple Valid() calls should return the same result
-			for i := 0; i < 10; i++ {
-				valid1 := iterator.Valid()
-				valid2 := iterator.Valid()
-				valid3 := iterator.Valid()
-				require.Equal(t, valid1, valid2)
-				require.Equal(t, valid2, valid3)
-
-				if !iterator.Next() {
-					break
-				}
-			}
-
-			return nil
-		})
-	})
-}
-
-func TestIterator_KeyValueAfterRelease(t *testing.T) {
-	bucket := "bucket"
-
-	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
-		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
-
-		for i := 0; i < 10; i++ {
-			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
-		}
-
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-
-			// Move to first element
-			require.True(t, iterator.Valid())
-
-			// Release the iterator
-			iterator.Release()
-
-			// After release, should be invalid
-			require.False(t, iterator.Valid())
-			require.Nil(t, iterator.Key())
-			require.Nil(t, iterator.Item())
-
-			_, err := iterator.Value()
-			require.Error(t, err)
-
-			return nil
-		})
-	})
-}
-
-func TestIterator_SeekNonExistent(t *testing.T) {
+func TestIterator_SeekReverse_NonExistent(t *testing.T) {
 	bucket := "bucket"
 
 	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
@@ -365,86 +122,152 @@ func TestIterator_SeekNonExistent(t *testing.T) {
 			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
 		}
 
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+		require.NoError(t, db.View(func(tx *Tx) error {
+			it := NewIterator(tx, bucket, IteratorOptions{Reverse: true})
+			defer it.Close()
+			require.NoError(t, it.Err())
 
-			// Seek to key 3 (doesn't exist, should position at 4)
-			found := iterator.Seek(testutils.GetTestBytes(3))
-			require.True(t, found)
-			require.True(t, iterator.Valid())
-
-			key := iterator.Key()
-			require.Equal(t, testutils.GetTestBytes(4), key)
-
+			// Seek to key 3 (doesn't exist, should position at 2 in reverse)
+			it.Seek(testutils.GetTestBytes(3))
+			require.True(t, it.Valid())
+			require.Equal(t, testutils.GetTestBytes(2), it.Item().Key())
 			return nil
-		})
+		}))
 	})
 }
 
-func TestIterator_MultipleSeeks(t *testing.T) {
+func TestIterator_Prefix_Forward(t *testing.T) {
+	bucket := "bucket"
+	prefix := []byte("user:")
+
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+		txPut(t, db, bucket, []byte("foo:1"), []byte("x"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("user:1"), []byte("a"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("user:2"), []byte("b"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("zzz"), []byte("y"), Persistent, nil, nil)
+
+		require.NoError(t, db.View(func(tx *Tx) error {
+			it := NewIterator(tx, bucket, IteratorOptions{Prefix: prefix})
+			defer it.Close()
+			require.NoError(t, it.Err())
+
+			var keys [][]byte
+			it.ForEach(func(item *IteratorItem) bool {
+				keys = append(keys, item.KeyCopy(nil))
+				return true
+			})
+
+			require.Equal(t, [][]byte{[]byte("user:1"), []byte("user:2")}, keys)
+			return nil
+		}))
+	})
+}
+
+func TestIterator_Prefix_Reverse(t *testing.T) {
+	bucket := "bucket"
+	prefix := []byte("user:")
+
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+		txPut(t, db, bucket, []byte("foo:1"), []byte("x"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("user:1"), []byte("a"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("user:2"), []byte("b"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("zzz"), []byte("y"), Persistent, nil, nil)
+
+		require.NoError(t, db.View(func(tx *Tx) error {
+			it := NewIterator(tx, bucket, IteratorOptions{Reverse: true, Prefix: prefix})
+			defer it.Close()
+			require.NoError(t, it.Err())
+
+			var keys [][]byte
+			it.ForEach(func(item *IteratorItem) bool {
+				keys = append(keys, item.KeyCopy(nil))
+				return true
+			})
+
+			require.Equal(t, [][]byte{[]byte("user:2"), []byte("user:1")}, keys)
+			return nil
+		}))
+	})
+}
+
+func TestIterator_Range(t *testing.T) {
 	bucket := "bucket"
 
 	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
 		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
 
-		for i := 0; i < 100; i++ {
-			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
-		}
+		txPut(t, db, bucket, []byte("a"), []byte("a"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("b"), []byte("b"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("c"), []byte("c"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("d"), []byte("d"), Persistent, nil, nil)
 
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+		require.NoError(t, db.View(func(tx *Tx) error {
+			it := NewIterator(tx, bucket, IteratorOptions{Start: []byte("b"), End: []byte("c")})
+			defer it.Close()
+			require.NoError(t, it.Err())
 
-			// Seek to different positions
-			positions := []int{10, 50, 20, 80, 5}
-			for _, pos := range positions {
-				require.True(t, iterator.Seek(testutils.GetTestBytes(pos)))
-				require.True(t, iterator.Valid())
-				key := iterator.Key()
-				require.Equal(t, testutils.GetTestBytes(pos), key)
+			var keys [][]byte
+			for it.Rewind(); it.Valid(); it.Next() {
+				keys = append(keys, it.Item().KeyCopy(nil))
 			}
-
+			require.Equal(t, [][]byte{[]byte("b"), []byte("c")}, keys)
 			return nil
-		})
+		}))
 	})
 }
 
-func TestIterator_CachedItemConsistency(t *testing.T) {
+func TestIterator_TTL_DefaultExcludesExpired(t *testing.T) {
 	bucket := "bucket"
 
-	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+	runNutsDBTestWithMockClock(t, nil, func(t *testing.T, db *DB, mc ttl.Clock) {
 		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
 
-		for i := 0; i < 50; i++ {
-			txPut(t, db, bucket, testutils.GetTestBytes(i), testutils.GetTestBytes(i), Persistent, nil, nil)
-		}
+		txPut(t, db, bucket, []byte("alive"), []byte("1"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("dead"), []byte("2"), 1, nil, nil) // TTL=1s
 
-		_ = db.View(func(tx *Tx) error {
-			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+		mc.AdvanceTime(2 * time.Second)
 
-			for iterator.Valid() {
-				// Get the same data multiple ways
-				key1 := iterator.Key()
-				key2 := iterator.Key()
-				item := iterator.Item()
+		require.NoError(t, db.View(func(tx *Tx) error {
+			it := NewIterator(tx, bucket, IteratorOptions{})
+			defer it.Close()
+			require.NoError(t, it.Err())
 
-				// All should be consistent
-				require.Equal(t, key1, key2)
-				require.Equal(t, key1, item.Key)
-
-				// Value should match key for this test
-				value, err := iterator.Value()
-				require.NoError(t, err)
-				require.Equal(t, key1, value)
-
-				if !iterator.Next() {
-					break
-				}
+			var keys [][]byte
+			for it.Rewind(); it.Valid(); it.Next() {
+				keys = append(keys, it.Item().KeyCopy(nil))
 			}
-
+			require.Equal(t, [][]byte{[]byte("alive")}, keys)
 			return nil
-		})
+		}))
+	})
+}
+
+func TestIterator_TTL_IncludeExpired(t *testing.T) {
+	bucket := "bucket"
+
+	runNutsDBTestWithMockClock(t, nil, func(t *testing.T, db *DB, mc ttl.Clock) {
+		txCreateBucket(t, db, DataStructureBTree, bucket, nil)
+
+		txPut(t, db, bucket, []byte("alive"), []byte("1"), Persistent, nil, nil)
+		txPut(t, db, bucket, []byte("dead"), []byte("2"), 1, nil, nil) // TTL=1s
+
+		mc.AdvanceTime(2 * time.Second)
+
+		require.NoError(t, db.View(func(tx *Tx) error {
+			it := NewIterator(tx, bucket, IteratorOptions{IncludeExpired: true})
+			defer it.Close()
+			require.NoError(t, it.Err())
+
+			var keys [][]byte
+			for it.Rewind(); it.Valid(); it.Next() {
+				keys = append(keys, it.Item().KeyCopy(nil))
+			}
+			require.Equal(t, [][]byte{[]byte("alive"), []byte("dead")}, keys)
+			return nil
+		}))
 	})
 }

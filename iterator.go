@@ -16,127 +16,208 @@ package nutsdb
 
 import (
 	"github.com/nutsdb/nutsdb/internal/core"
-	"github.com/tidwall/btree"
+	"github.com/nutsdb/nutsdb/internal/data"
 )
 
-type Iterator struct {
-	tx      *Tx
-	options IteratorOptions
-	iter    btree.IterG[*core.Item[core.Record]]
-	// Cached current item to avoid repeated iter.Item() calls
-	currentItem *core.Item[core.Record]
-	// Track validity state to avoid unnecessary checks
-	valid bool
-}
-
 type IteratorOptions struct {
-	Reverse bool
+	Reverse        bool
+	Prefix         []byte
+	Start          []byte
+	End            []byte
+	IncludeExpired bool
+
+	// Reserved for future use (2.0+). The initial implementation keeps value
+	// fetching lazy; these options may be used to implement read-ahead.
+	PrefetchValues bool
+	PrefetchSize   int
 }
 
-// Returns a new iterator.
-// The Release method must be called when finished with the iterator.
-func NewIterator(tx *Tx, bucket string, options IteratorOptions) *Iterator {
-	b, err := tx.db.bucketMgr.GetBucket(DataStructureBTree, bucket)
-	if err != nil {
+// Iterator provides a KV (BTree) iterator with TTL/range/prefix filtering.
+//
+// Iterator is not safe for concurrent use.
+//
+// 2.0 API notes:
+// - NewIterator never returns nil; check it.Err() for construction errors.
+// - Use `for it.Rewind(); it.Valid(); it.Next() { ... }` or `it.ForEach(...)` to avoid manual breaks.
+type Iterator struct {
+	tx   *Tx
+	opt  IteratorOptions
+	iter *data.BTreeIterator
+
+	item IteratorItem
+	err  error
+}
+
+// IteratorItem represents the current key/value pair during iteration.
+// The returned slices are only valid until the iterator is repositioned (Next/Seek/Rewind)
+// and while the owning transaction is open.
+type IteratorItem struct {
+	it     *Iterator
+	key    []byte
+	record *core.Record
+}
+
+func (item *IteratorItem) Key() []byte {
+	return item.key
+}
+
+func (item *IteratorItem) KeyCopy(dst []byte) []byte {
+	if item.key == nil {
 		return nil
 	}
-	iterator := &Iterator{
-		tx:      tx,
-		options: options,
-		iter:    tx.db.Index.BTree.GetWithDefault(b.Id).Iter(),
+	if cap(dst) < len(item.key) {
+		dst = make([]byte, len(item.key))
 	}
-
-	// Initialize position and cache the first item
-	if options.Reverse {
-		iterator.valid = iterator.iter.Last()
-	} else {
-		iterator.valid = iterator.iter.First()
-	}
-
-	if iterator.valid {
-		iterator.currentItem = iterator.iter.Item()
-	}
-
-	return iterator
+	dst = dst[:len(item.key)]
+	copy(dst, item.key)
+	return dst
 }
 
-func (it *Iterator) Rewind() bool {
-	if it.options.Reverse {
-		it.valid = it.iter.Last()
-	} else {
-		it.valid = it.iter.First()
+func (item *IteratorItem) Value(fn func(val []byte) error) error {
+	if item.it == nil || item.it.tx == nil {
+		return ErrIteratorInvalid
 	}
-
-	if it.valid {
-		it.currentItem = it.iter.Item()
-	} else {
-		it.currentItem = nil
+	if item.it.err != nil {
+		return item.it.err
 	}
-
-	return it.valid
+	if item.record == nil {
+		return ErrIteratorInvalid
+	}
+	val, err := item.it.tx.db.getValueByRecord(item.record)
+	if err != nil {
+		return err
+	}
+	if fn == nil {
+		return nil
+	}
+	return fn(val)
 }
 
-func (it *Iterator) Seek(key []byte) bool {
-	it.valid = it.iter.Seek(&core.Item[core.Record]{Key: key})
-
-	if it.valid {
-		it.currentItem = it.iter.Item()
-	} else {
-		it.currentItem = nil
+func (item *IteratorItem) ValueCopy(dst []byte) ([]byte, error) {
+	var val []byte
+	err := item.Value(func(v []byte) error {
+		val = v
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	return it.valid
+	if cap(dst) < len(val) {
+		dst = make([]byte, len(val))
+	}
+	dst = dst[:len(val)]
+	copy(dst, val)
+	return dst, nil
 }
 
-func (it *Iterator) Next() bool {
-	if !it.valid {
-		return false
+// NewIterator returns a new KV iterator for the given bucket.
+// It never returns nil. Callers MUST check Err() after construction.
+func NewIterator(tx *Tx, bucket string, opt IteratorOptions) *Iterator {
+	it := &Iterator{tx: tx, opt: opt}
+	it.item.it = it
+
+	if tx == nil {
+		it.err = ErrTxClosed
+		return it
+	}
+	if err := tx.checkTxIsClosed(); err != nil {
+		it.err = err
+		return it
 	}
 
-	if it.options.Reverse {
-		it.valid = it.iter.Prev()
-	} else {
-		it.valid = it.iter.Next()
+	b, err := tx.db.bucketMgr.GetBucket(DataStructureBTree, bucket)
+	if err != nil {
+		it.err = ErrBucketNotFound
+		return it
 	}
 
-	if it.valid {
-		it.currentItem = it.iter.Item()
-	} else {
-		it.currentItem = nil
-	}
+	bt := tx.db.Index.BTree.GetWithDefault(b.Id)
+	it.iter = data.NewBTreeIterator(bt, data.BTreeIteratorOptions{
+		Reverse:        opt.Reverse,
+		Prefix:         opt.Prefix,
+		Start:          opt.Start,
+		End:            opt.End,
+		IncludeExpired: opt.IncludeExpired,
+	})
+	it.refreshItem()
+	return it
+}
 
-	return it.valid
+func (it *Iterator) Err() error {
+	return it.err
 }
 
 func (it *Iterator) Valid() bool {
-	return it.valid
+	return it.err == nil && it.iter != nil && it.iter.Valid()
 }
 
-func (it *Iterator) Key() []byte {
-	if !it.valid {
+func (it *Iterator) Item() *IteratorItem {
+	if !it.Valid() {
 		return nil
 	}
-	return it.currentItem.Key
+	return &it.item
 }
 
-func (it *Iterator) Value() ([]byte, error) {
-	if !it.valid {
-		return nil, ErrKeyNotFound
+func (it *Iterator) Rewind() {
+	if it.err != nil || it.iter == nil {
+		return
 	}
-	return it.tx.db.getValueByRecord(it.currentItem.Record)
+	it.iter.Rewind()
+	it.refreshItem()
 }
 
-// Item returns the current item (key + record) if valid
-// This is useful for advanced use cases that need direct access to the record
-func (it *Iterator) Item() *core.Item[core.Record] {
-	if !it.valid {
-		return nil
+func (it *Iterator) Seek(key []byte) {
+	if it.err != nil || it.iter == nil {
+		return
 	}
-	return it.currentItem
+	it.iter.Seek(key)
+	it.refreshItem()
 }
 
-func (it *Iterator) Release() {
-	it.iter.Release()
-	it.currentItem = nil
-	it.valid = false
+func (it *Iterator) Next() {
+	if it.err != nil || it.iter == nil {
+		return
+	}
+	it.iter.Next()
+	it.refreshItem()
+}
+
+// ForEach iterates from the beginning (Rewind) and stops when fn returns false.
+func (it *Iterator) ForEach(fn func(item *IteratorItem) bool) {
+	if it.err != nil || it.iter == nil || fn == nil {
+		return
+	}
+	for it.Rewind(); it.Valid(); it.Next() {
+		if !fn(&it.item) {
+			return
+		}
+	}
+}
+
+func (it *Iterator) Close() {
+	if it.iter != nil {
+		it.iter.Close()
+	}
+	it.iter = nil
+	it.item.key = nil
+	it.item.record = nil
+	if it.err == nil {
+		it.err = ErrIteratorInvalid
+	}
+}
+
+func (it *Iterator) refreshItem() {
+	if !it.Valid() {
+		it.item.key = nil
+		it.item.record = nil
+		return
+	}
+	cur := it.iter.Item()
+	if cur == nil || cur.Record == nil {
+		it.item.key = nil
+		it.item.record = nil
+		return
+	}
+	it.item.key = cur.Key
+	it.item.record = cur.Record
 }

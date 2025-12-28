@@ -804,47 +804,54 @@ if err := db.View(
 
 ### 迭代器
 
-主要是迭代器的选项参数`Reverse`的值来决定正向还是反向迭代器, 当前版本还不支持HintBPTSparseIdxMode的迭代器
+主要通过迭代器的选项参数 `Reverse` 来决定正向/反向迭代。
+
+2.0 起迭代器要点：
+- `NewIterator` 不会返回 `nil`，创建后请检查 `iterator.Err()`
+- 推荐使用 `for iterator.Rewind(); iterator.Valid(); iterator.Next() { ... }` 或 `iterator.ForEach(...)`，避免手写 `break`
+- `iterator.Item()` 返回 `*IteratorItem`，其 `Key()/Value()` 结果仅在下一次 `Next/Seek/Rewind` 之前、且事务未关闭时有效；需要长期持有请用 `KeyCopy/ValueCopy`
 
 
 #### 正向的迭代器
 
 ```go
-tx, err := db.Begin(false)
-iterator := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Reverse: false})
-i := 0
-for i < 10 {
-    ok, err := iterator.SetNext()
-    fmt.Println("ok, err", ok, err)
-    fmt.Println("Key: ", string(iterator.Entry().Key))
-    fmt.Println("Value: ", string(iterator.Entry().Value))
-    fmt.Println()
-    i++
-}
-err = tx.Commit()
-if err != nil {
-    panic(err)
-}
+_ = db.View(func(tx *nutsdb.Tx) error {
+    iterator := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Reverse: false})
+    defer iterator.Close()
+    if err := iterator.Err(); err != nil {
+        return err
+    }
+
+    for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+        item := iterator.Item()
+        key := item.Key()
+        val, _ := item.ValueCopy(nil)
+        fmt.Println("Key:", string(key))
+        fmt.Println("Value:", string(val))
+    }
+    return nil
+})
 ```
 
 #### 反向的迭代器
 
 ```go
-tx, err := db.Begin(false)
-iterator := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Reverse: true})
-i := 0
-for i < 10 {
-    ok, err := iterator.SetNext()
-    fmt.Println("ok, err", ok, err)
-    fmt.Println("Key: ", string(iterator.Entry().Key))
-    fmt.Println("Value: ", string(iterator.Entry().Value))
-    fmt.Println()
-    i++
-}
-err = tx.Commit()
-if err != nil {
-    panic(err)
-}
+_ = db.View(func(tx *nutsdb.Tx) error {
+    iterator := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Reverse: true})
+    defer iterator.Close()
+    if err := iterator.Err(); err != nil {
+        return err
+    }
+
+    for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+        item := iterator.Item()
+        key := item.Key()
+        val, _ := item.ValueCopy(nil)
+        fmt.Println("Key:", string(key))
+        fmt.Println("Value:", string(val))
+    }
+    return nil
+})
 ```
 
 

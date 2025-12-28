@@ -1174,10 +1174,13 @@ func TestDB_MergeWithTTLScanner(t *testing.T) {
 				case <-ticker.C:
 					_ = db.View(func(tx *Tx) error {
 						it := NewIterator(tx, bucket, IteratorOptions{})
-						for it.Seek(nil); it.Valid(); it.Next() {
-							_, _ = it.Value()
+						if it.Err() != nil {
+							return it.Err()
 						}
-						it.Release()
+						for it.Rewind(); it.Valid(); it.Next() {
+							_ = it.Item().Value(nil)
+						}
+						it.Close()
 						return nil
 					})
 				}

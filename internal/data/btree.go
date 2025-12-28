@@ -351,22 +351,18 @@ func (b *BTreeScanner) WithDataStructure(ds uint16) Scanner {
 
 // checkItem validates an item against all filters and returns the iteration result.
 func (b *BTreeScanner) checkItem(item *core.Item[core.Record]) iterResult {
-	// TTL check
-	if !b.skipTTL && !b.isValid(item) {
-		return iterContinue
-	}
-
-	// Range check
-	if !b.inRange(item) {
-		return iterStop
-	}
-
-	// Prefix check
-	if b.prefix != nil && !bytes.HasPrefix(item.Key, b.prefix) {
-		if b.direction == Forward {
-			return iterStop // prefix exhausted in forward scan
-		}
-		return iterContinue // skip in reverse scan
+	result := (&btreeFilter{
+		ttlChecker:     b.ttlChecker,
+		bucketId:       b.bt.bucketId,
+		ds:             b.ds,
+		direction:      b.direction,
+		startKey:       b.startKey,
+		endKey:         b.endKey,
+		prefix:         b.prefix,
+		includeExpired: b.skipTTL,
+	}).check(item)
+	if result != iterMatch {
+		return result
 	}
 
 	// Regex check
@@ -518,15 +514,4 @@ func (b *BTreeScanner) isValid(item *core.Item[core.Record]) bool {
 		return true
 	}
 	return b.ttlChecker.FilterExpiredRecord(b.bt.bucketId, item.Key, item.Record, b.ds)
-}
-
-// inRange checks if an item is within the specified key range.
-func (b *BTreeScanner) inRange(item *core.Item[core.Record]) bool {
-	if b.direction == Forward {
-		return (b.startKey == nil || bytes.Compare(item.Key, b.startKey) >= 0) &&
-			(b.endKey == nil || bytes.Compare(item.Key, b.endKey) <= 0)
-	}
-	// Reverse: item should be >= endKey (lower bound) and <= startKey (upper bound/pivot)
-	return (b.endKey == nil || bytes.Compare(item.Key, b.endKey) >= 0) &&
-		(b.startKey == nil || bytes.Compare(item.Key, b.startKey) <= 0)
 }

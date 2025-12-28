@@ -97,49 +97,93 @@ if err := db.View(
 }
 ```
 
-### iterator
+### Iterator
 
-The option parameter `Reverse` that determines whether the iterator is forward or Reverse. The current version does not support the iterator for HintBPTSparseIdxMode.
+NutsDB provides a KV iterator (BTree bucket) with streaming prefix/range constraints and TTL filtering.
 
-<table>
-<thead><tr><th>Forward</th><th>Reverse</th></tr></thead>
-<tbody>
-<tr><td>
+Key points:
+- `NewIterator` never returns `nil`. Check `it.Err()` after creation.
+- Iterate without manual `break` using `for it.Rewind(); it.Valid(); it.Next() { ... }` or `it.ForEach(...)`.
+- `it.Item()` returns an `*IteratorItem` whose `Key()` / `Value()` results are only valid until the next `Next/Seek/Rewind` and while the transaction is open. Use `KeyCopy/ValueCopy` for stable copies.
 
-```go
-tx, err := db.Begin(false)
-iterator := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Reverse: false})
-i := 0
-for i < 10 {
-    ok, err := iterator.SetNext()
-    fmt.Println("ok, err", ok, err)
-    fmt.Println("Key: ", string(iterator.Entry().Key))
-    fmt.Println("Value: ", string(iterator.Entry().Value))
-    fmt.Println()
-    i++
-}
-err = tx.Commit()
-if err != nil {
-    panic(err)
-}
-```
-
-</td><td>
+#### Forward iteration
 
 ```go
-tx, err := db.Begin(false)
-iterator := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Reverse: true})
-i := 0
-for i < 10 {
-    ok, err := iterator.SetNext()
-    fmt.Println("ok, err", ok, err)
-    fmt.Println("Key: ", string(iterator.Entry().Key))
-    fmt.Println("Value: ", string(iterator.Entry().Value))
-    fmt.Println()
-    i++
-}
-err = tx.Commit()
-if err != nil {
-    panic(err)
-}
+_ = db.View(func(tx *nutsdb.Tx) error {
+    it := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{})
+    defer it.Close()
+    if err := it.Err(); err != nil {
+        return err
+    }
+
+    for it.Rewind(); it.Valid(); it.Next() {
+        item := it.Item()
+        k := item.Key()
+        v, _ := item.ValueCopy(nil)
+        fmt.Println(string(k), string(v))
+    }
+    return nil
+})
 ```
+
+#### Reverse iteration
+
+```go
+_ = db.View(func(tx *nutsdb.Tx) error {
+    it := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Reverse: true})
+    defer it.Close()
+    if err := it.Err(); err != nil {
+        return err
+    }
+
+    for it.Rewind(); it.Valid(); it.Next() {
+        item := it.Item()
+        k := item.Key()
+        v, _ := item.ValueCopy(nil)
+        fmt.Println(string(k), string(v))
+    }
+    return nil
+})
+```
+
+#### Prefix scan (streaming)
+
+```go
+_ = db.View(func(tx *nutsdb.Tx) error {
+    it := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Prefix: []byte(\"user:\")})
+    defer it.Close()
+    if err := it.Err(); err != nil {
+        return err
+    }
+
+    it.ForEach(func(item *nutsdb.IteratorItem) bool {
+        fmt.Println(string(item.Key()))
+        return true
+    })
+    return nil
+})
+```
+
+#### Range scan (inclusive)
+
+```go
+_ = db.View(func(tx *nutsdb.Tx) error {
+    it := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{
+        Start: []byte(\"user:0010\"),
+        End:   []byte(\"user:0020\"),
+    })
+    defer it.Close()
+    if err := it.Err(); err != nil {
+        return err
+    }
+
+    for it.Rewind(); it.Valid(); it.Next() {
+        fmt.Println(string(it.Item().Key()))
+    }
+    return nil
+})
+```
+
+#### TTL (expired keys)
+
+By default, expired keys are excluded. Use `IncludeExpired: true` to include them in the iterator output.

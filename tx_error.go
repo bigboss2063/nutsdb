@@ -63,4 +63,7 @@ var (
 	ErrStartGreaterThanEnd = errors.New("start is greater than end")
 
 	ErrInvalidKey = errors.New("invalid key")
+
+	// ErrIteratorInvalid is returned when iterator is exhausted, closed, or otherwise invalid.
+	ErrIteratorInvalid = errors.New("iterator is invalid")
 )

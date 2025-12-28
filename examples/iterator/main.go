@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+
 	"github.com/nutsdb/nutsdb"
 )
 
@@ -49,14 +50,17 @@ func forwardIteration() {
 		panic(err)
 	}
 	iterator := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Reverse: false})
-	for {
-		value, _ := iterator.Value()
-		fmt.Println("Key: ", string(iterator.Key()))
+	defer iterator.Close()
+	if err := iterator.Err(); err != nil {
+		panic(err)
+	}
+
+	for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+		item := iterator.Item()
+		value, _ := item.ValueCopy(nil)
+		fmt.Println("Key: ", string(item.Key()))
 		fmt.Println("Value: ", string(value))
 		fmt.Println()
-		if !iterator.Next() {
-			break
-		}
 	}
 	err = tx.Commit()
 	if err != nil {
@@ -72,14 +76,17 @@ func reverseIterative() {
 		panic(err)
 	}
 	iterator := nutsdb.NewIterator(tx, bucket, nutsdb.IteratorOptions{Reverse: true})
-	for {
-		value, _ := iterator.Value()
-		fmt.Println("Key: ", string(iterator.Key()))
+	defer iterator.Close()
+	if err := iterator.Err(); err != nil {
+		panic(err)
+	}
+
+	for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+		item := iterator.Item()
+		value, _ := item.ValueCopy(nil)
+		fmt.Println("Key: ", string(item.Key()))
 		fmt.Println("Value: ", string(value))
 		fmt.Println()
-		if !iterator.Next() {
-			break
-		}
 	}
 	err = tx.Commit()
 	if err != nil {

@@ -68,10 +68,10 @@ func BenchmarkIterator_Creation(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		err := db.View(func(tx *Tx) error {
 			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			if iterator == nil {
-				b.Fatal("Failed to create iterator")
+			if err := iterator.Err(); err != nil {
+				b.Fatalf("iterator creation failed: %v", err)
 			}
-			iterator.Release()
+			iterator.Close()
 			return nil
 		})
 		if err != nil {
@@ -95,14 +95,14 @@ func BenchmarkIterator_Next(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				err := db.View(func(tx *Tx) error {
 					iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-					defer iterator.Release()
+					defer iterator.Close()
+					if err := iterator.Err(); err != nil {
+						return err
+					}
 
 					count := 0
-					for iterator.Valid() {
+					for iterator.Rewind(); iterator.Valid(); iterator.Next() {
 						count++
-						if !iterator.Next() {
-							break
-						}
 					}
 					return nil
 				})
@@ -129,14 +129,14 @@ func BenchmarkIterator_Prev(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				err := db.View(func(tx *Tx) error {
 					iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: true})
-					defer iterator.Release()
+					defer iterator.Close()
+					if err := iterator.Err(); err != nil {
+						return err
+					}
 
 					count := 0
-					for iterator.Valid() {
+					for iterator.Rewind(); iterator.Valid(); iterator.Next() {
 						count++
-						if !iterator.Next() {
-							break
-						}
 					}
 					return nil
 				})
@@ -159,13 +159,13 @@ func BenchmarkIterator_KeyAccess(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		err := db.View(func(tx *Tx) error {
 			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+			defer iterator.Close()
+			if err := iterator.Err(); err != nil {
+				return err
+			}
 
-			for iterator.Valid() {
-				_ = iterator.Key()
-				if !iterator.Next() {
-					break
-				}
+			for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+				_ = iterator.Item().Key()
 			}
 			return nil
 		})
@@ -186,15 +186,14 @@ func BenchmarkIterator_ValueAccess(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		err := db.View(func(tx *Tx) error {
 			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+			defer iterator.Close()
+			if err := iterator.Err(); err != nil {
+				return err
+			}
 
-			for iterator.Valid() {
-				_, err := iterator.Value()
-				if err != nil {
+			for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+				if err := iterator.Item().Value(nil); err != nil {
 					return err
-				}
-				if !iterator.Next() {
-					break
 				}
 			}
 			return nil
@@ -216,16 +215,16 @@ func BenchmarkIterator_KeyValueAccess(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		err := db.View(func(tx *Tx) error {
 			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+			defer iterator.Close()
+			if err := iterator.Err(); err != nil {
+				return err
+			}
 
-			for iterator.Valid() {
-				_ = iterator.Key()
-				_, err := iterator.Value()
-				if err != nil {
+			for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+				item := iterator.Item()
+				_ = item.Key()
+				if err := item.Value(nil); err != nil {
 					return err
-				}
-				if !iterator.Next() {
-					break
 				}
 			}
 			return nil
@@ -253,10 +252,14 @@ func BenchmarkIterator_Seek(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		err := db.View(func(tx *Tx) error {
 			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+			defer iterator.Close()
+			if err := iterator.Err(); err != nil {
+				return err
+			}
 
 			seekKey := seekKeys[i%1000]
-			if !iterator.Seek(seekKey) {
+			iterator.Seek(seekKey)
+			if !iterator.Valid() {
 				return fmt.Errorf("seek failed for key %v", seekKey)
 			}
 			return nil
@@ -278,17 +281,19 @@ func BenchmarkIterator_Rewind(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		err := db.View(func(tx *Tx) error {
 			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+			defer iterator.Close()
+			if err := iterator.Err(); err != nil {
+				return err
+			}
 
 			// Move forward a bit
+			iterator.Rewind()
 			for j := 0; j < 100 && iterator.Valid(); j++ {
 				iterator.Next()
 			}
 
 			// Rewind back to start
-			if !iterator.Rewind() {
-				return fmt.Errorf("rewind failed")
-			}
+			iterator.Rewind()
 			return nil
 		})
 		if err != nil {
@@ -308,26 +313,25 @@ func BenchmarkIterator_PartialScan(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		err := db.View(func(tx *Tx) error {
 			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+			defer iterator.Close()
+			if err := iterator.Err(); err != nil {
+				return err
+			}
 
 			// Seek to starting position
 			startKey := testutils.GetTestBytes(10000)
-			if !iterator.Seek(startKey) {
-				return fmt.Errorf("seek failed")
-			}
+			iterator.Seek(startKey)
 
 			// Scan 1000 items
 			count := 0
 			for iterator.Valid() && count < 1000 {
-				_ = iterator.Key()
-				_, err := iterator.Value()
-				if err != nil {
+				item := iterator.Item()
+				_ = item.Key()
+				if err := item.Value(nil); err != nil {
 					return err
 				}
 				count++
-				if !iterator.Next() {
-					break
-				}
+				iterator.Next()
 			}
 			return nil
 		})
@@ -347,7 +351,10 @@ func BenchmarkIterator_ValidCheck(b *testing.B) {
 
 	err := db.View(func(tx *Tx) error {
 		iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-		defer iterator.Release()
+		defer iterator.Close()
+		if err := iterator.Err(); err != nil {
+			return err
+		}
 
 		for i := 0; i < b.N; i++ {
 			_ = iterator.Valid()
@@ -378,14 +385,14 @@ func BenchmarkIterator_MultipleIterators(b *testing.B) {
 			// Use all iterators
 			for j := 0; j < 10; j++ {
 				if iterators[j].Valid() {
-					_ = iterators[j].Key()
+					_ = iterators[j].Item().Key()
 					iterators[j].Next()
 				}
 			}
 
 			// Release all iterators
 			for j := 0; j < 10; j++ {
-				iterators[j].Release()
+				iterators[j].Close()
 			}
 			return nil
 		})
@@ -434,15 +441,14 @@ func BenchmarkIterator_LargeValues(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		err := db.View(func(tx *Tx) error {
 			iterator := NewIterator(tx, bucket, IteratorOptions{Reverse: false})
-			defer iterator.Release()
+			defer iterator.Close()
+			if err := iterator.Err(); err != nil {
+				return err
+			}
 
-			for iterator.Valid() {
-				_, err := iterator.Value()
-				if err != nil {
+			for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+				if err := iterator.Item().Value(nil); err != nil {
 					return err
-				}
-				if !iterator.Next() {
-					break
 				}
 			}
 			return nil
