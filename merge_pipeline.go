@@ -6,8 +6,10 @@ import (
 	"hash"
 	"hash/fnv"
 	"io"
+	"log"
 	"os"
 	"slices"
+	"time"
 
 	"github.com/nutsdb/nutsdb/internal/core"
 	"github.com/nutsdb/nutsdb/internal/utils"
@@ -18,7 +20,6 @@ type mergeJob struct {
 	db             *DB
 	pending        []int64
 	outputs        []*mergeOutput
-	lookup         []*mergeLookupEntry
 	manifest       *mergeManifest
 	oldData        []string
 	oldHints       []string
@@ -59,10 +60,9 @@ const mergeLookupEntryOverhead int64 = 64
 // We no longer store original file metadata for staleness checking - this reduces memory usage
 // significantly in large merges (from ~145 bytes/entry to ~50 bytes/entry + key length).
 type mergeLookupEntry struct {
-	hint         *HintEntry     // Hint entry containing key and location metadata
-	valueHash    uint32         // Hash of the value for Set/SortedSet duplicate detection
-	hasValueHash bool           // Indicates if valueHash is valid
-	collector    *HintCollector // Hint file collector for writing hints
+	hint         *HintEntry // Hint entry containing key and location metadata
+	valueHash    uint32     // Hash of the value for Set/SortedSet duplicate detection
+	hasValueHash bool       // Indicates if valueHash is valid
 }
 
 // mergeOutput represents a single merge output file with its associated hint file.
@@ -148,7 +148,7 @@ func (job *mergeJob) prepare() error {
 	// Skip merge if there are fewer than 2 files
 	if len(job.pending) < 2 {
 		job.db.mu.Unlock()
-		return nil // No merge needed if only one file
+		return ErrDontNeedMerge // No merge needed if only one file
 	}
 
 	// Sort files by ID for consistent processing order
@@ -187,9 +187,6 @@ func (job *mergeJob) prepare() error {
 // enterWritingState initializes the merge job for writing entries.
 // Creates the merge manifest and prepares necessary data structures.
 func (job *mergeJob) enterWritingState() error {
-	// Initialize lookup entries for tracking merged entries
-	job.lookup = make([]*mergeLookupEntry, 0)
-
 	// Create merge manifest to track merge progress
 	job.manifest = &mergeManifest{
 		Status:            manifestStatusWriting,
@@ -231,56 +228,85 @@ func (job *mergeJob) finalizeOutputs() error {
 	return nil
 }
 
-// commit atomically updates in-memory indexes and writes hint files.
+// commit updates in-memory indexes and records the merge manifest.
 // Note: We don't validate staleness here. If an entry was updated concurrently during merge,
-// we'll write the stale version to the hint file. This is safe because during index rebuild,
-// merge files (negative FileIDs) are processed before normal files (positive FileIDs), so
-// newer values will overwrite stale ones. This tradeoff saves significant memory.
+// we'll apply the stale version. This is safe because during index rebuild, merge files
+// (negative FileIDs) are processed before normal files (positive FileIDs), so newer values
+// will overwrite stale ones.
 func (job *mergeJob) commit() error {
-	var peakBytes int64
-	for _, entry := range job.lookup {
-		if entry == nil || entry.hint == nil {
-			continue
+	if job.db.opt.EnableHintFile {
+		if err := job.flushHintCollectors(); err != nil {
+			return err
 		}
-		peakBytes += estimateLookupBytes(entry.hint)
 	}
 
-	batches := 0
-	if peakBytes > 0 {
-		batches = 1
-	}
+	budgetBytes := job.mergeLookupMemoryBudget()
+	batchSize := job.mergeLookupBatchSize()
 
-	job.db.mu.Lock()
-	lockStart := time.Now()
-	defer func() {
-		job.diagnostics = mergeDiagnostics{
-			peakLookupBytes: peakBytes,
-			maxLockHold:     time.Since(lockStart),
-			batches:         batches,
+	var (
+		batch       []*mergeLookupEntry
+		batchBytes  int64
+		peakBytes   int64
+		maxLockHold time.Duration
+		batches     int
+	)
+
+	applyBatch := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+
+		job.db.mu.Lock()
+		lockStart := time.Now()
+		for _, entry := range batch {
+			job.applyLookup(entry)
 		}
 		job.db.mu.Unlock()
-	}()
 
-	// Phase 1: Write all hints to hint files (even potentially stale ones)
-	// This ensures hints are available for fast index recovery
-	for _, entry := range job.lookup {
-		if entry == nil {
-			continue
+		lockDuration := time.Since(lockStart)
+		if lockDuration > maxLockHold {
+			maxLockHold = lockDuration
 		}
-		if entry.collector != nil && entry.hint != nil {
-			if err := entry.collector.Add(entry.hint); err != nil {
-				return fmt.Errorf("failed to add hint to collector: %w", err)
+		batches++
+
+		batch = batch[:0]
+		batchBytes = 0
+		return nil
+	}
+
+	addLookup := func(entry *mergeLookupEntry) error {
+		if entry == nil || entry.hint == nil {
+			return nil
+		}
+		entryBytes := estimateLookupBytes(entry.hint)
+		if budgetBytes > 0 && batchBytes+entryBytes > budgetBytes && len(batch) > 0 {
+			if err := applyBatch(); err != nil {
+				return err
 			}
+		}
+		batch = append(batch, entry)
+		batchBytes += entryBytes
+		if batchBytes > peakBytes {
+			peakBytes = batchBytes
+		}
+		if batchSize > 0 && len(batch) >= batchSize {
+			return applyBatch()
+		}
+		return nil
+	}
+
+	if job.db.opt.EnableHintFile {
+		if err := job.applyLookupsFromHints(addLookup); err != nil {
+			return err
+		}
+	} else {
+		if err := job.applyLookupsFromDataFiles(addLookup); err != nil {
+			return err
 		}
 	}
 
-	// Phase 2: Update in-memory indexes (for current runtime correctness)
-	// This ensures the database continues to work correctly after merge
-	for _, entry := range job.lookup {
-		if entry == nil {
-			continue
-		}
-		job.applyLookup(entry)
+	if err := applyBatch(); err != nil {
+		return err
 	}
 
 	// Update merge manifest with completion status
@@ -302,7 +328,40 @@ func (job *mergeJob) commit() error {
 		job.oldHints = append(job.oldHints, getHintPath(fid, job.db.opt.Dir))
 	}
 
+	job.diagnostics = mergeDiagnostics{
+		peakLookupBytes: peakBytes,
+		maxLockHold:     maxLockHold,
+		batches:         batches,
+	}
+	log.Printf("[merge] diagnostics: peak_lookup_bytes=%d max_lock_hold=%s batches=%d budget_bytes=%d batch_size=%d",
+		job.diagnostics.peakLookupBytes,
+		job.diagnostics.maxLockHold,
+		job.diagnostics.batches,
+		budgetBytes,
+		batchSize,
+	)
+
 	return nil
+}
+
+func (job *mergeJob) mergeLookupMemoryBudget() int64 {
+	if job.db == nil {
+		return defaultMergeLookupMemoryBudget
+	}
+	if job.db.opt.MergeLookupMemoryBudget <= 0 {
+		return defaultMergeLookupMemoryBudget
+	}
+	return job.db.opt.MergeLookupMemoryBudget
+}
+
+func (job *mergeJob) mergeLookupBatchSize() int {
+	if job.db == nil {
+		return defaultMergeLookupBatchSize
+	}
+	if job.db.opt.MergeLookupBatchSize <= 0 {
+		return defaultMergeLookupBatchSize
+	}
+	return job.db.opt.MergeLookupBatchSize
 }
 
 func estimateLookupBytes(hint *HintEntry) int64 {
@@ -310,6 +369,175 @@ func estimateLookupBytes(hint *HintEntry) int64 {
 		return 0
 	}
 	return hint.Size() + mergeLookupEntryOverhead
+}
+
+func (job *mergeJob) flushHintCollectors() error {
+	for _, out := range job.outputs {
+		if out == nil || out.collector == nil {
+			continue
+		}
+		if err := out.collector.Sync(); err != nil {
+			return fmt.Errorf("sync hint collector: %w", err)
+		}
+	}
+	return nil
+}
+
+func (job *mergeJob) applyLookupsFromHints(add func(*mergeLookupEntry) error) error {
+	for _, out := range job.outputs {
+		if out == nil {
+			continue
+		}
+
+		hintPath := out.hintPath
+		if hintPath == "" {
+			hintPath = getHintPath(out.fileID, job.db.opt.Dir)
+		}
+
+		reader := &HintFileReader{}
+		if err := reader.Open(hintPath); err != nil {
+			return fmt.Errorf("open hint file %s: %w", hintPath, err)
+		}
+
+		var fr *fileRecovery
+		closeAll := func() {
+			_ = reader.Close()
+			if fr != nil {
+				_ = fr.release()
+			}
+		}
+
+		for {
+			hint, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				closeAll()
+				return fmt.Errorf("read hint file %s: %w", hintPath, err)
+			}
+			if hint == nil {
+				continue
+			}
+
+			lookup := &mergeLookupEntry{hint: hint}
+			if hint.Ds == DataStructureSet || hint.Ds == DataStructureSortedSet {
+				if fr == nil {
+					dataPath := out.dataPath
+					if dataPath == "" {
+						dataPath = getDataPath(out.fileID, job.db.opt.Dir)
+					}
+					fr, err = newFileRecovery(dataPath, job.db.opt.BufferSizeOfRecovery)
+					if err != nil {
+						closeAll()
+						return fmt.Errorf("open merge data file %s: %w", dataPath, err)
+					}
+				}
+				entry, err := fr.readEntry(int64(hint.DataPos))
+				if err != nil {
+					closeAll()
+					return fmt.Errorf("read merge entry at offset %d: %w", hint.DataPos, err)
+				}
+				if entry == nil {
+					closeAll()
+					return fmt.Errorf("merge entry missing at offset %d", hint.DataPos)
+				}
+				hash, err := job.hashValue(entry.Value)
+				if err != nil {
+					closeAll()
+					return fmt.Errorf("compute value hash: %w", err)
+				}
+				lookup.valueHash = hash
+				lookup.hasValueHash = true
+			}
+
+			if err := add(lookup); err != nil {
+				closeAll()
+				return err
+			}
+		}
+
+		closeAll()
+	}
+	return nil
+}
+
+func (job *mergeJob) applyLookupsFromDataFiles(add func(*mergeLookupEntry) error) error {
+	for _, out := range job.outputs {
+		if out == nil {
+			continue
+		}
+
+		dataPath := out.dataPath
+		if dataPath == "" {
+			dataPath = getDataPath(out.fileID, job.db.opt.Dir)
+		}
+		fr, err := newFileRecovery(dataPath, job.db.opt.BufferSizeOfRecovery)
+		if err != nil {
+			return fmt.Errorf("open merge data file %s: %w", dataPath, err)
+		}
+
+		off := int64(0)
+		for off < fr.size {
+			entry, err := fr.readEntry(off)
+			if err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, ErrIndexOutOfBound) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, core.ErrHeaderSizeOutOfBounds) {
+					break
+				}
+				_ = fr.release()
+				return fmt.Errorf("read merge entry at offset %d: %w", off, err)
+			}
+			if entry == nil {
+				break
+			}
+			sz := entry.Size()
+			if sz <= 0 {
+				off++
+				continue
+			}
+
+			entryOff := off
+			off += sz
+
+			if entry.Meta.Status != Committed {
+				continue
+			}
+			if entry.IsFilter() {
+				continue
+			}
+
+			hint := newHintEntryFromEntry(entry, out.fileID, uint64(entryOff))
+			lookup := &mergeLookupEntry{hint: hint}
+			if entry.Meta.Ds == DataStructureSet || entry.Meta.Ds == DataStructureSortedSet {
+				hash, err := job.hashValue(entry.Value)
+				if err != nil {
+					_ = fr.release()
+					return fmt.Errorf("compute value hash: %w", err)
+				}
+				lookup.valueHash = hash
+				lookup.hasValueHash = true
+			}
+
+			if err := add(lookup); err != nil {
+				_ = fr.release()
+				return err
+			}
+		}
+
+		_ = fr.release()
+	}
+	return nil
+}
+
+func (job *mergeJob) hashValue(value []byte) (uint32, error) {
+	if job.valueHasher == nil {
+		job.valueHasher = fnv.New32a()
+	}
+	job.valueHasher.Reset()
+	if _, err := job.valueHasher.Write(value); err != nil {
+		return 0, err
+	}
+	return job.valueHasher.Sum32(), nil
 }
 
 // cleanupOldFiles removes the old data and hint files that were merged, as well as the manifest file.
@@ -469,24 +697,11 @@ func (job *mergeJob) writeEntry(entry *core.Entry) error {
 	// Create hint entry for fast index lookup
 	hint := newHintEntryFromEntry(entry, out.fileID, uint64(offset))
 
-	lookupEntry := &mergeLookupEntry{
-		hint:      hint,
-		collector: out.collector,
-	}
-
-	// For Set and SortedSet, compute value hash to handle duplicate detection
-	if entry.Meta.Ds == DataStructureSet || entry.Meta.Ds == DataStructureSortedSet {
-		h := job.valueHasher
-		h.Reset()
-		if _, err := h.Write(entry.Value); err != nil {
-			return fmt.Errorf("failed to compute value hash: %w", err)
+	if out.collector != nil {
+		if err := out.collector.Add(hint); err != nil {
+			return fmt.Errorf("failed to add hint to collector: %w", err)
 		}
-		lookupEntry.valueHash = h.Sum32()
-		lookupEntry.hasValueHash = true
 	}
-
-	// Store lookup entry for later index update during commit phase
-	job.lookup = append(job.lookup, lookupEntry)
 
 	return nil
 }

@@ -123,6 +123,14 @@ type Options struct {
 	// MergeInterval represent the interval for automatic merges, with 0 meaning automatic merging is disabled.
 	MergeInterval time.Duration
 
+	// MergeLookupMemoryBudget represents the maximum bytes of lookup metadata
+	// kept in memory per merge commit batch.
+	MergeLookupMemoryBudget int64
+
+	// MergeLookupBatchSize represents the max entries applied per lock acquisition
+	// during merge commit.
+	MergeLookupBatchSize int
+
 	// MaxBatchCount represents max entries in batch
 	MaxBatchCount int64
 
@@ -167,6 +175,11 @@ const (
 // defaultSegmentSize is default data file size.
 var defaultSegmentSize int64 = 256 * MB
 
+const (
+	defaultMergeLookupMemoryBudget int64 = 64 * MB
+	defaultMergeLookupBatchSize          = 2048
+)
+
 // DefaultOptions represents the default options.
 var DefaultOptions = func() Options {
 	return Options{
@@ -177,6 +190,8 @@ var DefaultOptions = func() Options {
 		SyncEnable:                true,
 		CommitBufferSize:          4 * MB,
 		MergeInterval:             2 * time.Hour,
+		MergeLookupMemoryBudget:   defaultMergeLookupMemoryBudget,
+		MergeLookupBatchSize:      defaultMergeLookupBatchSize,
 		MaxBatchSize:              (15 * defaultSegmentSize / 4) / 100,
 		MaxBatchCount:             (15 * defaultSegmentSize / 4) / 100 / 100,
 		HintKeyAndRAMIdxCacheSize: 0,
@@ -283,6 +298,18 @@ func WithCommitBufferSize(commitBufferSize int64) Option {
 func WithLessFunc(lessFunc LessFunc) Option {
 	return func(opt *Options) {
 		opt.LessFunc = lessFunc
+	}
+}
+
+func WithMergeLookupMemoryBudget(bytes int64) Option {
+	return func(opt *Options) {
+		opt.MergeLookupMemoryBudget = bytes
+	}
+}
+
+func WithMergeLookupBatchSize(size int) Option {
+	return func(opt *Options) {
+		opt.MergeLookupBatchSize = size
 	}
 }
 

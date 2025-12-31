@@ -247,6 +247,14 @@ MB，这个可以自己配置。但是一旦被设置，下次启动数据库也
 
 `MergeInterval` 表示自动化 Merge 的间隔，0 表示不触发自动化 Merge，默认间隔为 2 小时。
 
+- MergeLookupMemoryBudget int64
+
+`MergeLookupMemoryBudget` 表示 merge 提交阶段批量查找元数据的内存预算（字节）。
+
+- MergeLookupBatchSize int
+
+`MergeLookupBatchSize` 表示 merge 提交阶段每次持锁应用的查找条数上限。
+
 - MaxBatchCount int64
 
 `MaxBatchCount` 表示批量写入的最大条数。
@@ -298,6 +306,8 @@ var DefaultOptions = func() Options {
 		SyncEnable:                true,
 		CommitBufferSize:          4 * MB,
 		MergeInterval:             2 * time.Hour,
+		MergeLookupMemoryBudget:   defaultMergeLookupMemoryBudget,
+		MergeLookupBatchSize:      defaultMergeLookupBatchSize,
 		MaxBatchSize:              (15 * defaultSegmentSize / 4) / 100,
 		MaxBatchCount:             (15 * defaultSegmentSize / 4) / 100 / 100,
 		HintKeyAndRAMIdxCacheSize: 0,

@@ -16,6 +16,8 @@ About options see here for detail.
 | ErrorHandler         | `ErrorHandler` handles an error that occur during transaction. | ErrorHandler      |
 | LessFunc             | `LessFunc` represents func to sort keys. Nutsdb sorts keys in lexicographical order by default. | LessFunc          |
 | MergeInterval        | `MergeInterval` represent the interval for automatic merges, with 0 meaning automatic merging is disabled. Default interval is 2 hours. | time.Duration     |
+| MergeLookupMemoryBudget | `MergeLookupMemoryBudget` caps in-flight merge lookup metadata per commit batch (bytes). | int64          |
+| MergeLookupBatchSize | `MergeLookupBatchSize` limits lookup entries applied per lock acquisition during merge commit. | int               |
 | MaxBatchCount        | `MaxBatchCount` represents max entries in batch.             | int64             |
 | MaxBatchSize         | `MaxBatchSize` represents max batch size in bytes.           | int64             |
 | HintKeyAndRAMIdxCacheSize | Cache size for HintKeyAndRAMIdxMode. When set to 0, caching is disabled. | int |
@@ -39,6 +41,8 @@ var DefaultOptions = func() Options {
         SyncEnable:                true,
         CommitBufferSize:          4 * MB,
         MergeInterval:             2 * time.Hour,
+        MergeLookupMemoryBudget:   defaultMergeLookupMemoryBudget,
+        MergeLookupBatchSize:      defaultMergeLookupBatchSize,
         MaxBatchSize:              (15 * defaultSegmentSize / 4) / 100,
         MaxBatchCount:             (15 * defaultSegmentSize / 4) / 100 / 100,
         HintKeyAndRAMIdxCacheSize: 0,

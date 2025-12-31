@@ -644,7 +644,7 @@ func TestMergeEnsureOutputRolloverCreatesNewSegment(t *testing.T) {
 	}
 }
 
-func TestMergeCommitCollectorFailure(t *testing.T) {
+func TestMergeWriteEntryCollectorFailure(t *testing.T) {
 	dir := t.TempDir()
 
 	opts := DefaultOptions
@@ -691,17 +691,11 @@ func TestMergeCommitCollectorFailure(t *testing.T) {
 		db:          db,
 		outputs:     []*mergeOutput{out},
 		valueHasher: fnv.New32a(),
-		manifest:    &mergeManifest{},
-		pending:     []int64{oldFileID},
 	}
 
 	entry := createTestEntry(bucketID, key, value, DataDeleteFlag, Committed, Persistent, timestamp, 1, DataStructureBTree)
-	if err := job.writeEntry(entry); err != nil {
-		t.Fatalf("writeEntry: %v", err)
-	}
-
-	if err := job.commit(); err == nil || !strings.Contains(err.Error(), "failed to add hint") {
-		t.Fatalf("commit should surface collector errors, got %v", err)
+	if err := job.writeEntry(entry); err == nil || !strings.Contains(err.Error(), "failed to add hint") {
+		t.Fatalf("writeEntry should surface collector errors, got %v", err)
 	}
 }
 
@@ -1121,13 +1115,15 @@ func TestMergeMergeAndTxConcurrentWritesWithSet(t *testing.T) {
 	}
 }
 
-func TestMergeCommitPhaseBlocking(t *testing.T) {
+func TestMergeCommitPhaseBatching(t *testing.T) {
 	dir := t.TempDir()
 
 	opts := DefaultOptions
 	opts.Dir = dir
 	opts.SegmentSize = 8 * 1024
 	opts.RWMode = FileIO
+	opts.EnableHintFile = true
+	opts.MergeLookupBatchSize = 10
 
 	db, err := Open(opts)
 	if err != nil {
@@ -1193,157 +1189,138 @@ func TestMergeCommitPhaseBlocking(t *testing.T) {
 	if err := job.rewrite(); err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
-
-	// Verify we have enough lookup entries
-	lookupCount := len(job.lookup)
-	if lookupCount < 100 {
-		t.Fatalf("expected at least 100 lookup entries for observable blocking, got %d", lookupCount)
-	}
-
-	// Use a channel to coordinate timing
-	commitHoldingLock := make(chan struct{})
-	commitDone := make(chan error, 1)
-
-	// Wrap the commit to inject a delay while holding the lock
-	// This ensures we can observe the blocking behavior
-	go func() {
-		// Signal just before acquiring the lock
-		close(commitHoldingLock)
-
-		// Acquire lock and process
-		job.db.mu.Lock()
-
-		// Add artificial delay to make blocking observable
-		// In real scenarios, commit with many entries would naturally take time
-		time.Sleep(30 * time.Millisecond)
-
-		// Now do the actual commit work (without re-locking)
-		var err error
-		func() {
-			defer job.db.mu.Unlock()
-
-			// Phase 1: Write all hints
-			for _, entry := range job.lookup {
-				if entry == nil {
-					continue
-				}
-				if entry.collector != nil && entry.hint != nil {
-					if e := entry.collector.Add(entry.hint); e != nil {
-						err = fmt.Errorf("failed to add hint to collector: %w", e)
-						return
-					}
-				}
-			}
-
-			// Phase 2: Update in-memory indexes
-			for _, entry := range job.lookup {
-				if entry == nil {
-					continue
-				}
-				job.applyLookup(entry)
-			}
-
-			// Update manifest
-			if len(job.outputs) == 0 {
-				job.manifest.MergeSeqMax = -1
-			} else {
-				job.manifest.MergeSeqMax = job.outputs[len(job.outputs)-1].seq
-			}
-			job.manifest.Status = manifestStatusCommitted
-			if e := writeMergeManifest(job.db.opt.Dir, job.manifest); e != nil {
-				err = e
-				return
-			}
-
-			// Prepare cleanup lists
-			job.oldData = job.oldData[:0]
-			job.oldHints = job.oldHints[:0]
-			for _, fid := range job.pending {
-				job.oldData = append(job.oldData, getDataPath(fid, job.db.opt.Dir))
-				job.oldHints = append(job.oldHints, getHintPath(fid, job.db.opt.Dir))
-			}
-		}()
-
-		commitDone <- err
-	}()
-
-	// Wait for commit goroutine to start
-	<-commitHoldingLock
-	time.Sleep(5 * time.Millisecond) // Give it time to acquire the lock
-
-	// Now try concurrent update - should be blocked
-	updateStart := time.Now()
-	updateDone := make(chan error, 1)
-	go func() {
-		updateDone <- db.Update(func(tx *Tx) error {
-			return tx.Put(bucket, []byte("concurrent-key"), []byte("concurrent-value"), Persistent)
-		})
-	}()
-
-	// The update should be blocked and then succeed
-	select {
-	case err := <-updateDone:
-		blockDuration := time.Since(updateStart)
-		if err != nil {
-			t.Fatalf("concurrent update failed: %v", err)
-		}
-		// Should be blocked for at least 20ms (we injected 30ms delay, minus some overhead)
-		if blockDuration < 20*time.Millisecond {
-			t.Fatalf("update completed too quickly (%v), was not properly blocked by commit phase", blockDuration)
-		}
-		t.Logf("Update was successfully blocked for %v", blockDuration)
-	case <-time.After(10 * time.Second):
-		t.Fatal("concurrent update blocked for too long (>10s), possible deadlock")
-	}
-
-	if err := <-commitDone; err != nil {
+	if err := job.commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	if err := job.finalizeOutputs(); err != nil {
+		t.Fatalf("finalizeOutputs: %v", err)
+	}
+	if err := job.cleanupOldFiles(); err != nil {
+		t.Fatalf("cleanupOldFiles: %v", err)
+	}
 
-	// Verify the concurrent write succeeded
-	if err := db.View(func(tx *Tx) error {
-		got, err := tx.Get(bucket, []byte("concurrent-key"))
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(got, []byte("concurrent-value")) {
-			return fmt.Errorf("concurrent write value mismatch")
-		}
-		return nil
+	if job.diagnostics.batches < 2 {
+		t.Fatalf("expected multiple commit batches, got %d", job.diagnostics.batches)
+	}
+	if job.diagnostics.maxLockHold <= 0 {
+		t.Fatalf("expected non-zero lock hold duration")
+	}
+}
+
+func TestMergeCommitRespectsLookupBudget(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultOptions
+	opts.Dir = dir
+	opts.SegmentSize = 8 * 1024
+	opts.RWMode = FileIO
+	opts.EnableHintFile = true
+	opts.MergeLookupBatchSize = 1000
+
+	sampleKey := bytes.Repeat([]byte("k"), 64)
+	sampleValue := []byte("value")
+	sampleEntry := createTestEntry(1, sampleKey, sampleValue, DataSetFlag, Committed, Persistent, uint64(time.Now().Unix()), 1, DataStructureBTree)
+	sampleHint := newHintEntryFromEntry(sampleEntry, 1, 0)
+	budget := estimateLookupBytes(sampleHint) * 3
+	opts.MergeLookupMemoryBudget = budget
+
+	db, err := Open(opts)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	bucket := "bucket"
+	if err := db.Update(func(tx *Tx) error {
+		return tx.NewBucket(DataStructureBTree, bucket)
 	}); err != nil {
-		t.Fatalf("verify concurrent write: %v", err)
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	fillerVal := bytes.Repeat([]byte("x"), 256)
+	for i := 0; i < 500; i++ {
+		key := []byte(fmt.Sprintf("key-%04d-%s", i, sampleKey))
+		if err := db.Update(func(tx *Tx) error {
+			return tx.Put(bucket, key, fillerVal, Persistent)
+		}); err != nil {
+			t.Fatalf("populate entry %d: %v", i, err)
+		}
+	}
+
+	var haveMultipleFiles bool
+	for attempts := 0; attempts < 10; attempts++ {
+		userIDs, _, err := enumerateDataFileIDs(dir)
+		if err != nil {
+			t.Fatalf("enumerate data files: %v", err)
+		}
+		if len(userIDs) >= 2 {
+			haveMultipleFiles = true
+			break
+		}
+		extraKey := []byte(fmt.Sprintf("extra-%04d", attempts))
+		if err := db.Update(func(tx *Tx) error {
+			return tx.Put(bucket, extraKey, fillerVal, Persistent)
+		}); err != nil {
+			t.Fatalf("add extra entry: %v", err)
+		}
+	}
+	if !haveMultipleFiles {
+		t.Fatal("expected multiple data files for merge test")
+	}
+
+	job := &mergeJob{db: db}
+	if err := job.prepare(); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := job.enterWritingState(); err != nil {
+		t.Fatalf("enterWritingState: %v", err)
+	}
+	if err := job.rewrite(); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := job.commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := job.finalizeOutputs(); err != nil {
+		t.Fatalf("finalizeOutputs: %v", err)
+	}
+	if err := job.cleanupOldFiles(); err != nil {
+		t.Fatalf("cleanupOldFiles: %v", err)
+	}
+
+	if job.diagnostics.peakLookupBytes > budget {
+		t.Fatalf("peak lookup bytes %d exceed budget %d", job.diagnostics.peakLookupBytes, budget)
+	}
+	if job.diagnostics.batches < 2 {
+		t.Fatalf("expected multiple batches, got %d", job.diagnostics.batches)
 	}
 }
 
 func TestMergeWriteEntryHashesSetAndSortedSet(t *testing.T) {
+	dir := t.TempDir()
+
 	opts := DefaultOptions
+	opts.Dir = dir
 	opts.EnableHintFile = false
 	opts.SegmentSize = 1 << 16
+	opts.RWMode = FileIO
 
-	db := &DB{opt: opts}
-	job := &mergeJob{db: db, valueHasher: fnv.New32a()}
-
-	mock := &mockRWManager{}
-	out := &mergeOutput{
-		fileID:   1,
-		dataFile: &DataFile{rwManager: mock},
+	db, err := Open(opts)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
 	}
-	job.outputs = []*mergeOutput{out}
+	defer func() { _ = db.Close() }()
+
+	job := &mergeJob{db: db}
+	out, err := job.newOutput()
+	if err != nil {
+		t.Fatalf("newOutput: %v", err)
+	}
 
 	setValue := []byte("set-value")
 	setEntry := createTestEntry(1, []byte("set-key"), setValue, DataSetFlag, Committed, Persistent, uint64(time.Now().Unix()), 1, DataStructureSet)
 	if err := job.writeEntry(setEntry); err != nil {
 		t.Fatalf("writeEntry set: %v", err)
-	}
-
-	if len(job.lookup) != 1 {
-		t.Fatalf("expected one lookup entry, got %d", len(job.lookup))
-	}
-
-	expectedSetHash := fnv.New32a()
-	_, _ = expectedSetHash.Write(setValue)
-	if !job.lookup[0].hasValueHash || job.lookup[0].valueHash != expectedSetHash.Sum32() {
-		t.Fatalf("set lookup should contain value hash")
 	}
 
 	sortedValue := []byte("sorted-value")
@@ -1352,15 +1329,44 @@ func TestMergeWriteEntryHashesSetAndSortedSet(t *testing.T) {
 		t.Fatalf("writeEntry sorted set: %v", err)
 	}
 
-	if len(job.lookup) != 2 {
-		t.Fatalf("expected two lookup entries, got %d", len(job.lookup))
+	if err := out.dataFile.Sync(); err != nil {
+		t.Fatalf("sync data file: %v", err)
 	}
 
 	expectedSortedHash := fnv.New32a()
 	_, _ = expectedSortedHash.Write(sortedValue)
-	entry := job.lookup[1]
-	if !entry.hasValueHash || entry.valueHash != expectedSortedHash.Sum32() {
+
+	expectedSetHash := fnv.New32a()
+	_, _ = expectedSetHash.Write(setValue)
+
+	var (
+		setLookup    *mergeLookupEntry
+		sortedLookup *mergeLookupEntry
+	)
+	if err := job.applyLookupsFromDataFiles(func(entry *mergeLookupEntry) error {
+		if entry == nil || entry.hint == nil {
+			return nil
+		}
+		switch entry.hint.Ds {
+		case DataStructureSet:
+			setLookup = entry
+		case DataStructureSortedSet:
+			sortedLookup = entry
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("applyLookupsFromDataFiles: %v", err)
+	}
+
+	if setLookup == nil || !setLookup.hasValueHash || setLookup.valueHash != expectedSetHash.Sum32() {
+		t.Fatalf("set lookup should contain value hash")
+	}
+	if sortedLookup == nil || !sortedLookup.hasValueHash || sortedLookup.valueHash != expectedSortedHash.Sum32() {
 		t.Fatalf("sorted set lookup should contain value hash")
+	}
+
+	if err := job.finalizeOutputs(); err != nil {
+		t.Fatalf("finalizeOutputs: %v", err)
 	}
 }
 
@@ -2094,9 +2100,6 @@ func TestMergeRewriteFileSkipsCorruptedEntries(t *testing.T) {
 		}
 	}
 
-	if len(job.lookup) != 1 {
-		t.Fatalf("expected lookup entry for merged record")
-	}
 }
 
 func TestMergeAbortAggregatesCleanupErrors(t *testing.T) {
