@@ -21,7 +21,6 @@ About options see here for detail.
 | HintKeyAndRAMIdxCacheSize | Cache size for HintKeyAndRAMIdxMode. When set to 0, caching is disabled. | int |
 | TTLConfig            | Configure TTL scanning and batching behavior (default values: BatchSize=100, BatchTimeout=1s, QueueSize=1000). | struct            |
 | EnableHintFile       | Enable/disable hint file feature.                            | bool              |
-| EnableMergeV2        | Enable/disable Merge V2 algorithm.                           | bool              |
 | ListImpl             | Specifies the implementation type for List data structure (default: ListImplBTree). | ListImplementationType |
 | EnableWatch          | `EnableWatch` toggles the watch feature. If `EnableWatch` is true, the watch feature will be enabled. The watch feature will be disabled by default. | bool              |
 | Clock                | Provides time operations for TTL calculations. If nil, a RealClock will be used by default. | ttl.Clock |
@@ -45,7 +44,6 @@ var DefaultOptions = func() Options {
         HintKeyAndRAMIdxCacheSize: 0,
         TTLConfig:                 ttl.DefaultConfig(),
         EnableHintFile:            false,
-        EnableMergeV2:             false,
         ListImpl:                  ListImplementationType(ListImplBTree),
         EnableWatch:               false,
         Clock:                     ttl.NewRealClock(),

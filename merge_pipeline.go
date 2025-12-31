@@ -7,47 +7,14 @@ import (
 	"hash/fnv"
 	"io"
 	"os"
-	"sort"
+	"slices"
 
 	"github.com/nutsdb/nutsdb/internal/core"
 	"github.com/nutsdb/nutsdb/internal/utils"
 )
 
-// mergeV2Job manages the entire merge operation lifecycle.
-//
-// # Memory Efficiency Design
-//
-// This implementation prioritizes memory efficiency over runtime validation by eliminating
-// staleness checking during the commit phase. In large-scale merges (e.g., 10GB+ of data),
-// this design choice provides significant memory savings:
-//
-//   - Previous approach: ~145 bytes per entry (with staleness metadata)
-//   - Current approach: ~50 bytes per entry (minimal metadata)
-//   - Savings: ~65% memory reduction for 10M entries (~1.4GB → ~500MB)
-//
-// # Correctness Guarantee via Index Rebuild
-//
-// Stale entries (those updated concurrently during merge) may be written to hint files.
-// This is safe because of the file ordering guarantee during index rebuild:
-//
-//  1. Merge files use negative FileIDs (starting from math.MinInt64)
-//  2. Normal data files use positive FileIDs (starting from 0)
-//  3. Index rebuild processes files in ascending FileID order
-//  4. Therefore: merge files are always processed BEFORE normal files
-//
-// Example scenario:
-//   - Merge begins: entry "foo" at File#3, timestamp=1000
-//   - During merge: concurrent update writes "foo" to File#4, timestamp=2000
-//   - Merge writes stale version to MergeFile#-9223372036854775808
-//   - On restart/rebuild:
-//     Step 1: Load MergeFile (fileID=-9223372036854775808) → index["foo"] = {ts:1000, stale}
-//     Step 2: Load File#3 → skipped (merged away)
-//     Step 3: Load File#4 → index["foo"] = {ts:2000, fresh} ✓ Overwrites stale value
-//
-// This design trades hint file size and rebuild time for dramatically reduced memory usage
-// during merge operations, which is critical for Bitcask-based systems that already
-// consume significant memory for in-memory indexes.
-type mergeV2Job struct {
+// mergeJob manages the entire merge operation lifecycle.
+type mergeJob struct {
 	db             *DB
 	pending        []int64
 	outputs        []*mergeOutput
@@ -83,16 +50,15 @@ type mergeOutput struct {
 	finalized bool           // Whether this output has been finalized
 }
 
-// mergeV2 executes the complete merge operation using the V2 algorithm.
+// merge executes the complete merge operation.
 // This is the main entry point for the merge process, orchestrating all phases.
-func (db *DB) mergeV2() error {
-	job := &mergeV2Job{db: db}
+func (db *DB) merge() error {
+	job := &mergeJob{db: db}
 
 	// Prepare merge job - validate state and enumerate files
 	if err := job.prepare(); err != nil {
 		return err
 	}
-	defer job.finish()
 
 	// Enter writing state - prepare for merge operations
 	if err := job.enterWritingState(); err != nil {
@@ -124,11 +90,8 @@ func (db *DB) mergeV2() error {
 
 // prepare initializes the merge job by validating state, enumerating files, and setting up the database.
 // It ensures the database is ready for merge and creates a new active file for ongoing writes.
-func (job *mergeV2Job) prepare() error {
+func (job *mergeJob) prepare() error {
 	job.db.mu.Lock()
-
-	// Note: Concurrent merge prevention is handled by mergeWorker.performMerge()
-	// which sets the isMerging flag before calling this method
 
 	// Enumerate all data files (both user and merge files)
 	userIDs, mergeIDs, err := enumerateDataFileIDs(job.db.opt.Dir)
@@ -156,11 +119,11 @@ func (job *mergeV2Job) prepare() error {
 	// Skip merge if there are fewer than 2 files
 	if len(job.pending) < 2 {
 		job.db.mu.Unlock()
-		return ErrDontNeedMerge
+		return nil // No merge needed if only one file
 	}
 
 	// Sort files by ID for consistent processing order
-	sort.Slice(job.pending, func(i, j int) bool { return job.pending[i] < job.pending[j] })
+	slices.Sort(job.pending)
 
 	// Sync active file if using mmap without sync
 	if !job.db.opt.SyncEnable && job.db.opt.RWMode == MMap {
@@ -192,16 +155,9 @@ func (job *mergeV2Job) prepare() error {
 	return nil
 }
 
-// finish cleans up the merge job.
-// Always called via defer to ensure cleanup even if merge fails.
-// Note: The isMerging flag is managed by mergeWorker.performMerge()
-func (job *mergeV2Job) finish() {
-	// No-op: State is managed by mergeWorker
-}
-
 // enterWritingState initializes the merge job for writing entries.
 // Creates the merge manifest and prepares necessary data structures.
-func (job *mergeV2Job) enterWritingState() error {
+func (job *mergeJob) enterWritingState() error {
 	// Initialize lookup entries for tracking merged entries
 	job.lookup = make([]*mergeLookupEntry, 0)
 
@@ -226,7 +182,7 @@ func (job *mergeV2Job) enterWritingState() error {
 
 // rewrite processes all pending files and rewrites their valid entries to merge outputs.
 // This is the main phase where data compaction happens.
-func (job *mergeV2Job) rewrite() error {
+func (job *mergeJob) rewrite() error {
 	for _, fid := range job.pending {
 		if err := job.rewriteFile(fid); err != nil {
 			return err
@@ -237,7 +193,7 @@ func (job *mergeV2Job) rewrite() error {
 
 // finalizeOutputs ensures all output files are properly closed and synced to disk.
 // This must be called after all entries have been written.
-func (job *mergeV2Job) finalizeOutputs() error {
+func (job *mergeJob) finalizeOutputs() error {
 	for _, out := range job.outputs {
 		if err := out.finalize(); err != nil {
 			return err
@@ -251,7 +207,7 @@ func (job *mergeV2Job) finalizeOutputs() error {
 // we'll write the stale version to the hint file. This is safe because during index rebuild,
 // merge files (negative FileIDs) are processed before normal files (positive FileIDs), so
 // newer values will overwrite stale ones. This tradeoff saves significant memory.
-func (job *mergeV2Job) commit() error {
+func (job *mergeJob) commit() error {
 	job.db.mu.Lock()
 	defer job.db.mu.Unlock()
 
@@ -301,7 +257,7 @@ func (job *mergeV2Job) commit() error {
 
 // cleanupOldFiles removes the old data and hint files that were merged, as well as the manifest file.
 // This is called after a successful merge to reclaim disk space.
-func (job *mergeV2Job) cleanupOldFiles() error {
+func (job *mergeJob) cleanupOldFiles() error {
 	// Close and remove old data files
 	for _, path := range job.oldData {
 		_ = job.db.fm.fdm.CloseByPath(path)
@@ -321,7 +277,7 @@ func (job *mergeV2Job) cleanupOldFiles() error {
 
 // abort cleans up all created files when a merge fails and returns the original error.
 // It ensures no partial merge state is left behind and combines any cleanup errors.
-func (job *mergeV2Job) abort(err error) error {
+func (job *mergeJob) abort(err error) error {
 	var errs []error
 
 	// Clean up all output files created during the failed merge
@@ -358,7 +314,7 @@ func (job *mergeV2Job) abort(err error) error {
 
 // rewriteFile processes a single data file during merge, rewriting valid entries to new merge files.
 // It reads entries sequentially, filters out invalid/expired entries, and rewrites remaining entries.
-func (job *mergeV2Job) rewriteFile(fid int64) error {
+func (job *mergeJob) rewriteFile(fid int64) error {
 	path := getDataPath(fid, job.db.opt.Dir)
 	fr, err := newFileRecovery(path, job.db.opt.BufferSizeOfRecovery)
 	if err != nil {
@@ -426,7 +382,7 @@ func (job *mergeV2Job) rewriteFile(fid int64) error {
 
 // writeEntry writes an entry to the appropriate merge output file and creates the corresponding hint entry.
 // It also calculates value hashes for Set and SortedSet data structures to support duplicate detection.
-func (job *mergeV2Job) writeEntry(entry *core.Entry) error {
+func (job *mergeJob) writeEntry(entry *core.Entry) error {
 	if entry == nil {
 		return fmt.Errorf("cannot write nil entry")
 	}
@@ -480,7 +436,7 @@ func (job *mergeV2Job) writeEntry(entry *core.Entry) error {
 
 // ensureOutput returns the appropriate output file for writing entries of the given size.
 // If no output exists or the current output would exceed segment size, creates a new output.
-func (job *mergeV2Job) ensureOutput(size int64) (*mergeOutput, error) {
+func (job *mergeJob) ensureOutput(size int64) (*mergeOutput, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("invalid size: %d", size)
 	}
@@ -506,7 +462,7 @@ func (job *mergeV2Job) ensureOutput(size int64) (*mergeOutput, error) {
 
 // newOutput creates a new merge output file with associated hint file collector.
 // It generates unique file IDs using merge sequence numbers and cleans up any existing files.
-func (job *mergeV2Job) newOutput() (*mergeOutput, error) {
+func (job *mergeJob) newOutput() (*mergeOutput, error) {
 	seq := job.outputSeqBase + len(job.outputs)
 	fileID := GetMergeFileID(seq)
 	dataPath := getMergeDataPath(job.db.opt.Dir, seq)
@@ -612,7 +568,7 @@ func updateRecordWithHintIfNewer(record *core.Record, hint *HintEntry) bool {
 // IMPORTANT: We check timestamps to avoid overwriting newer entries that were written
 // after the merge started. The initial check happens in rewriteFile, but the index mutex
 // is released before commit, so newer entries might exist in the index now.
-func (job *mergeV2Job) applyLookup(entry *mergeLookupEntry) {
+func (job *mergeJob) applyLookup(entry *mergeLookupEntry) {
 	if entry == nil || entry.hint == nil {
 		return
 	}

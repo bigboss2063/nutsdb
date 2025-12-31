@@ -267,10 +267,6 @@ MB，这个可以自己配置。但是一旦被设置，下次启动数据库也
 
 `EnableHintFile` 表示是否启用提示文件功能。
 
-- EnableMergeV2 bool
-
-`EnableMergeV2` 表示是否启用 Merge V2 算法。
-
 - ListImpl ListImplementationType
 
 `ListImpl` 指定 List 数据结构的实现类型（默认：ListImplBTree）。
@@ -307,7 +303,6 @@ var DefaultOptions = func() Options {
 		HintKeyAndRAMIdxCacheSize: 0,
 		TTLConfig:                 ttl.DefaultConfig(),
 		EnableHintFile:            false,
-		EnableMergeV2:             false,
 		ListImpl:                  ListImplementationType(ListImplBTree),
 		EnableWatch:               false,
 		Clock:                     ttl.NewRealClock(),

@@ -18,7 +18,7 @@ import (
 	"github.com/nutsdb/nutsdb/internal/utils"
 )
 
-func TestMergeV2Utils(t *testing.T) {
+func TestMergeUtils(t *testing.T) {
 	t.Run("GetMergeFileID", func(t *testing.T) {
 		if got := GetMergeFileID(0); got != MergeFileIDBase {
 			t.Errorf("GetMergeFileID(0) = %d, want %d", got, MergeFileIDBase)
@@ -53,7 +53,7 @@ func TestMergeV2Utils(t *testing.T) {
 	})
 }
 
-func TestMergeV2Manifest(t *testing.T) {
+func TestMergeManifest(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("WriteAndLoad", func(t *testing.T) {
@@ -111,7 +111,7 @@ func TestMergeV2Manifest(t *testing.T) {
 	})
 }
 
-func TestMergeV2AbortCleansOutputs(t *testing.T) {
+func TestMergeAbortCleansOutputs(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "merge_5.dat")
 	hintPath := filepath.Join(dir, "merge_5.hint")
@@ -125,7 +125,7 @@ func TestMergeV2AbortCleansOutputs(t *testing.T) {
 
 	opts := DefaultOptions
 	opts.Dir = dir
-	job := &mergeV2Job{
+	job := &mergeJob{
 		db: &DB{opt: opts},
 		outputs: []*mergeOutput{
 			{seq: 5, dataPath: dataPath, hintPath: hintPath},
@@ -245,12 +245,11 @@ func TestPurgeMergeFiles(t *testing.T) {
 	}
 }
 
-func TestMergeV2BasicFlow(t *testing.T) {
+func TestMergeBasicFlow(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions
 	opts.Dir = dir
 	opts.SegmentSize = 8 * 1024 // 8KB - small segment to force multiple files
-	opts.EnableMergeV2 = true
 
 	db, err := Open(opts)
 	if err != nil {
@@ -484,7 +483,7 @@ func createTestEntry(bucketID core.BucketId, key, value []byte, flag uint16, sta
 	return entry
 }
 
-func TestMergeV2PrepareWhileAlreadyMerging(t *testing.T) {
+func TestMergePrepareWhileAlreadyMerging(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"0.dat", "1.dat"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte{0xAA}, 0o644); err != nil {
@@ -506,7 +505,7 @@ func TestMergeV2PrepareWhileAlreadyMerging(t *testing.T) {
 
 	// Note: Concurrent merge prevention is now handled by mergeWorker.performMerge()
 	// This test verifies that prepare() succeeds when called with valid setup
-	job := &mergeV2Job{db: db}
+	job := &mergeJob{db: db}
 
 	// prepare() should succeed with 2 files present
 	if err := job.prepare(); err != nil {
@@ -519,7 +518,7 @@ func TestMergeV2PrepareWhileAlreadyMerging(t *testing.T) {
 	}
 }
 
-func TestMergeV2PrepareSyncError(t *testing.T) {
+func TestMergePrepareSyncError(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"0.dat", "1.dat"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte{0xAA}, 0o644); err != nil {
@@ -539,7 +538,7 @@ func TestMergeV2PrepareSyncError(t *testing.T) {
 		fm:         NewFileManager(opts.RWMode, opts.MaxFdNumsInCache, opts.CleanFdsCacheThreshold, opts.SegmentSize),
 	}
 
-	job := &mergeV2Job{db: db}
+	job := &mergeJob{db: db}
 	err := job.prepare()
 	if err == nil || !strings.Contains(err.Error(), "failed to sync active file") {
 		t.Fatalf("unexpected error: %v", err)
@@ -554,14 +553,14 @@ func TestMergeV2PrepareSyncError(t *testing.T) {
 	// Note: isMerging state is now managed by mergeWorker.performMerge(), not by prepare()
 }
 
-func TestMergeV2EnsureOutputRejectsInvalidSize(t *testing.T) {
-	job := &mergeV2Job{db: &DB{opt: Options{SegmentSize: 1 << 20}}}
+func TestMergeEnsureOutputRejectsInvalidSize(t *testing.T) {
+	job := &mergeJob{db: &DB{opt: Options{SegmentSize: 1 << 20}}}
 	if _, err := job.ensureOutput(0); err == nil {
 		t.Fatal("ensureOutput should reject non-positive sizes")
 	}
 }
 
-func TestMergeV2NewOutputOldHintRemovalFailure(t *testing.T) {
+func TestMergeNewOutputOldHintRemovalFailure(t *testing.T) {
 	dir := t.TempDir()
 	hintDir := filepath.Join(dir, "merge_0.hint")
 	if err := os.Mkdir(hintDir, 0o755); err != nil {
@@ -582,13 +581,13 @@ func TestMergeV2NewOutputOldHintRemovalFailure(t *testing.T) {
 		fm:  NewFileManager(opts.RWMode, 4, 0.5, opts.SegmentSize),
 	}
 
-	job := &mergeV2Job{db: db}
+	job := &mergeJob{db: db}
 	if _, err := job.ensureOutput(128); err == nil || !strings.Contains(err.Error(), "failed to remove old hint file") {
 		t.Fatalf("expected removal error, got %v", err)
 	}
 }
 
-func TestMergeV2EnsureOutputRolloverCreatesNewSegment(t *testing.T) {
+func TestMergeEnsureOutputRolloverCreatesNewSegment(t *testing.T) {
 	dir := t.TempDir()
 
 	opts := DefaultOptions
@@ -602,7 +601,7 @@ func TestMergeV2EnsureOutputRolloverCreatesNewSegment(t *testing.T) {
 		fm:  NewFileManager(opts.RWMode, 4, 0.5, opts.SegmentSize),
 	}
 
-	job := &mergeV2Job{db: db}
+	job := &mergeJob{db: db}
 
 	out1, err := job.ensureOutput(64)
 	if err != nil {
@@ -645,7 +644,7 @@ func TestMergeV2EnsureOutputRolloverCreatesNewSegment(t *testing.T) {
 	}
 }
 
-func TestMergeV2CommitCollectorFailure(t *testing.T) {
+func TestMergeCommitCollectorFailure(t *testing.T) {
 	dir := t.TempDir()
 
 	opts := DefaultOptions
@@ -688,7 +687,7 @@ func TestMergeV2CommitCollectorFailure(t *testing.T) {
 		collector: collector,
 	}
 
-	job := &mergeV2Job{
+	job := &mergeJob{
 		db:          db,
 		outputs:     []*mergeOutput{out},
 		valueHasher: fnv.New32a(),
@@ -706,14 +705,14 @@ func TestMergeV2CommitCollectorFailure(t *testing.T) {
 	}
 }
 
-func TestMergeV2FinalizeOutputsSuccess(t *testing.T) {
+func TestMergeFinalizeOutputsSuccess(t *testing.T) {
 	collector := NewHintCollector(1, &recordingHintWriter{}, 1)
 	mock := &mockRWManager{}
 	out := &mergeOutput{
 		dataFile:  &DataFile{rwManager: mock},
 		collector: collector,
 	}
-	job := &mergeV2Job{outputs: []*mergeOutput{out}}
+	job := &mergeJob{outputs: []*mergeOutput{out}}
 
 	if err := job.finalizeOutputs(); err != nil {
 		t.Fatalf("finalizeOutputs: %v", err)
@@ -736,14 +735,14 @@ func TestMergeV2FinalizeOutputsSuccess(t *testing.T) {
 	}
 }
 
-func TestMergeV2FinalizeOutputsFailure(t *testing.T) {
+func TestMergeFinalizeOutputsFailure(t *testing.T) {
 	collector := NewHintCollector(1, &recordingHintWriter{}, 1)
 	mock := &mockRWManager{syncErr: errors.New("sync fail"), closeErr: errors.New("close fail")}
 	out := &mergeOutput{
 		dataFile:  &DataFile{rwManager: mock},
 		collector: collector,
 	}
-	job := &mergeV2Job{outputs: []*mergeOutput{out}}
+	job := &mergeJob{outputs: []*mergeOutput{out}}
 
 	err := job.finalizeOutputs()
 	if err == nil {
@@ -764,13 +763,12 @@ func TestMergeV2FinalizeOutputsFailure(t *testing.T) {
 	}
 }
 
-func TestMergeV2MergeAndTxConcurrentWrites(t *testing.T) {
+func TestMergeMergeAndTxConcurrentWrites(t *testing.T) {
 	dir := t.TempDir()
 
 	opts := DefaultOptions
 	opts.Dir = dir
 	opts.SegmentSize = 8 * 1024
-	opts.EnableMergeV2 = true
 	opts.RWMode = FileIO
 
 	db, err := Open(opts)
@@ -835,11 +833,11 @@ func TestMergeV2MergeAndTxConcurrentWrites(t *testing.T) {
 		t.Fatal("expected multiple data files for merge test")
 	}
 
-	job := &mergeV2Job{db: db}
+	job := &mergeJob{db: db}
 	if err := job.prepare(); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	defer job.finish()
+
 	if err := job.enterWritingState(); err != nil {
 		t.Fatalf("enterWritingState: %v", err)
 	}
@@ -938,13 +936,12 @@ func TestMergeV2MergeAndTxConcurrentWrites(t *testing.T) {
 	}
 }
 
-func TestMergeV2MergeAndTxConcurrentWritesWithSet(t *testing.T) {
+func TestMergeMergeAndTxConcurrentWritesWithSet(t *testing.T) {
 	dir := t.TempDir()
 
 	opts := DefaultOptions
 	opts.Dir = dir
 	opts.SegmentSize = 8 * 1024
-	opts.EnableMergeV2 = true
 	opts.RWMode = FileIO
 
 	db, err := Open(opts)
@@ -1008,11 +1005,11 @@ func TestMergeV2MergeAndTxConcurrentWritesWithSet(t *testing.T) {
 		t.Fatal("expected multiple data files for merge test")
 	}
 
-	job := &mergeV2Job{db: db}
+	job := &mergeJob{db: db}
 	if err := job.prepare(); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	defer job.finish()
+
 	if err := job.enterWritingState(); err != nil {
 		t.Fatalf("enterWritingState: %v", err)
 	}
@@ -1124,13 +1121,12 @@ func TestMergeV2MergeAndTxConcurrentWritesWithSet(t *testing.T) {
 	}
 }
 
-func TestMergeV2CommitPhaseBlocking(t *testing.T) {
+func TestMergeCommitPhaseBlocking(t *testing.T) {
 	dir := t.TempDir()
 
 	opts := DefaultOptions
 	opts.Dir = dir
 	opts.SegmentSize = 8 * 1024
-	opts.EnableMergeV2 = true
 	opts.RWMode = FileIO
 
 	db, err := Open(opts)
@@ -1186,11 +1182,11 @@ func TestMergeV2CommitPhaseBlocking(t *testing.T) {
 		t.Fatal("expected multiple data files for merge test")
 	}
 
-	job := &mergeV2Job{db: db}
+	job := &mergeJob{db: db}
 	if err := job.prepare(); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	defer job.finish()
+
 	if err := job.enterWritingState(); err != nil {
 		t.Fatalf("enterWritingState: %v", err)
 	}
@@ -1319,13 +1315,13 @@ func TestMergeV2CommitPhaseBlocking(t *testing.T) {
 	}
 }
 
-func TestMergeV2WriteEntryHashesSetAndSortedSet(t *testing.T) {
+func TestMergeWriteEntryHashesSetAndSortedSet(t *testing.T) {
 	opts := DefaultOptions
 	opts.EnableHintFile = false
 	opts.SegmentSize = 1 << 16
 
 	db := &DB{opt: opts}
-	job := &mergeV2Job{db: db, valueHasher: fnv.New32a()}
+	job := &mergeJob{db: db, valueHasher: fnv.New32a()}
 
 	mock := &mockRWManager{}
 	out := &mergeOutput{
@@ -1368,7 +1364,7 @@ func TestMergeV2WriteEntryHashesSetAndSortedSet(t *testing.T) {
 	}
 }
 
-func TestMergeV2ApplyLookupUpdatesSecondaryIndexes(t *testing.T) {
+func TestMergeApplyLookupUpdatesSecondaryIndexes(t *testing.T) {
 	clk := ttl.NewRealClock()
 	db := &DB{
 		opt: DefaultOptions,
@@ -1421,7 +1417,7 @@ func TestMergeV2ApplyLookupUpdatesSecondaryIndexes(t *testing.T) {
 	sortedHash := fnv.New32a()
 	_, _ = sortedHash.Write(sortedValue)
 
-	job := &mergeV2Job{db: db}
+	job := &mergeJob{db: db}
 
 	// Apply set lookup
 	job.applyLookup(&mergeLookupEntry{
@@ -1486,16 +1482,15 @@ func TestMergeV2ApplyLookupUpdatesSecondaryIndexes(t *testing.T) {
 	}
 }
 
-// TestMergeV2ConcurrentWritesDuringFullMerge tests the critical scenario where
+// TestMergeConcurrentWritesDuringFullMerge tests the critical scenario where
 // db.Merge() runs concurrently with ongoing write transactions. This validates
 // that the merge operation doesn't corrupt data or lose updates.
-func TestMergeV2ConcurrentWritesDuringFullMerge(t *testing.T) {
+func TestMergeConcurrentWritesDuringFullMerge(t *testing.T) {
 	dir := t.TempDir()
 
 	opts := DefaultOptions
 	opts.Dir = dir
 	opts.SegmentSize = 16 * 1024 // Small segments to force multiple files
-	opts.EnableMergeV2 = true
 	opts.RWMode = FileIO
 
 	db, err := Open(opts)
@@ -1654,16 +1649,15 @@ func TestMergeV2ConcurrentWritesDuringFullMerge(t *testing.T) {
 	}
 }
 
-// TestMergeV2ReopenAfterConcurrentMerge validates the critical correctness guarantee:
+// TestMergeReopenAfterConcurrentMerge validates the critical correctness guarantee:
 // even if merge writes stale hints (due to concurrent updates), index rebuild on reopen
 // must correctly handle this by processing files in order (merge files first, then normal files).
-func TestMergeV2ReopenAfterConcurrentMerge(t *testing.T) {
+func TestMergeReopenAfterConcurrentMerge(t *testing.T) {
 	dir := t.TempDir()
 
 	opts := DefaultOptions
 	opts.Dir = dir
 	opts.SegmentSize = 16 * 1024
-	opts.EnableMergeV2 = true
 	opts.EnableHintFile = true // Critical: test hint file rebuild
 	opts.RWMode = FileIO
 
@@ -1797,8 +1791,8 @@ func TestMergeV2ReopenAfterConcurrentMerge(t *testing.T) {
 	}
 }
 
-// TestMergeV2MultiDataStructuresConcurrent tests merge with all data structures together
-func TestMergeV2MultiDataStructuresConcurrent(t *testing.T) {
+// TestMergeMultiDataStructuresConcurrent tests merge with all data structures together
+func TestMergeMultiDataStructuresConcurrent(t *testing.T) {
 	opts := DefaultOptions
 	dir := t.TempDir()
 	opts.Dir = dir
@@ -2014,7 +2008,7 @@ func TestMergeV2MultiDataStructuresConcurrent(t *testing.T) {
 	}
 }
 
-func TestMergeV2RewriteFileSkipsCorruptedEntries(t *testing.T) {
+func TestMergeRewriteFileSkipsCorruptedEntries(t *testing.T) {
 	dir := t.TempDir()
 	fid := int64(0)
 	path := getDataPath(fid, dir)
@@ -2076,7 +2070,7 @@ func TestMergeV2RewriteFileSkipsCorruptedEntries(t *testing.T) {
 	db.ttlService = ttl.NewService(clk, ttl.DefaultConfig(), db.handleExpiredKeys)
 
 	mock := &mockRWManager{}
-	job := &mergeV2Job{
+	job := &mergeJob{
 		db:      db,
 		outputs: []*mergeOutput{{fileID: GetMergeFileID(0), dataFile: &DataFile{rwManager: mock}}},
 	}
@@ -2105,7 +2099,7 @@ func TestMergeV2RewriteFileSkipsCorruptedEntries(t *testing.T) {
 	}
 }
 
-func TestMergeV2AbortAggregatesCleanupErrors(t *testing.T) {
+func TestMergeAbortAggregatesCleanupErrors(t *testing.T) {
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
 	hintDir := filepath.Join(dir, "hint")
@@ -2125,7 +2119,7 @@ func TestMergeV2AbortAggregatesCleanupErrors(t *testing.T) {
 	mock := &mockRWManager{syncErr: errors.New("sync fail"), closeErr: errors.New("close fail")}
 	collector := NewHintCollector(1, &failingHintWriter{syncErr: errors.New("hint sync fail"), closeErr: errors.New("hint close fail")}, 1)
 
-	job := &mergeV2Job{
+	job := &mergeJob{
 		db: &DB{opt: Options{Dir: dir}},
 		outputs: []*mergeOutput{
 			{
@@ -2151,14 +2145,14 @@ func TestMergeV2AbortAggregatesCleanupErrors(t *testing.T) {
 	}
 }
 
-func TestMergeV2CleanupOldFilesPropagatesErrors(t *testing.T) {
+func TestMergeCleanupOldFilesPropagatesErrors(t *testing.T) {
 	dir := t.TempDir()
 	nested := filepath.Join(dir, "old")
 	if err := os.MkdirAll(filepath.Join(nested, "child"), 0o755); err != nil {
 		t.Fatalf("mkdir nested: %v", err)
 	}
 
-	job := &mergeV2Job{
+	job := &mergeJob{
 		db:      &DB{opt: Options{Dir: dir}, fm: NewFileManager(FileIO, 1, 0.5, 1<<12)},
 		oldData: []string{nested},
 	}
