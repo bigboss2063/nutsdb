@@ -64,6 +64,8 @@ type (
 		statusMgr               *StatusManager
 		transactionMgr          *txManager
 		mergeWorker             *mergeWorker
+		mergeDiagnosticsMu      sync.RWMutex
+		mergeDiagnostics        mergeDiagnostics
 		fm                      *FileManager
 		flock                   *flock.Flock
 		commitBuffer            *bytes.Buffer

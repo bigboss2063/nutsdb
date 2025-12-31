@@ -25,7 +25,35 @@ type mergeJob struct {
 	outputSeqBase  int
 	valueHasher    hash.Hash32
 	onRewriteEntry func(*core.Entry)
+	diagnostics    mergeDiagnostics
 }
+
+type mergeDiagnostics struct {
+	peakLookupBytes int64
+	maxLockHold     time.Duration
+	batches         int
+}
+
+func (db *DB) setMergeDiagnostics(diag mergeDiagnostics) {
+	if db == nil {
+		return
+	}
+	db.mergeDiagnosticsMu.Lock()
+	db.mergeDiagnostics = diag
+	db.mergeDiagnosticsMu.Unlock()
+}
+
+func (db *DB) lastMergeDiagnostics() mergeDiagnostics {
+	if db == nil {
+		return mergeDiagnostics{}
+	}
+	db.mergeDiagnosticsMu.RLock()
+	diag := db.mergeDiagnostics
+	db.mergeDiagnosticsMu.RUnlock()
+	return diag
+}
+
+const mergeLookupEntryOverhead int64 = 64
 
 // mergeLookupEntry tracks minimal information needed to update indexes at commit time.
 // We no longer store original file metadata for staleness checking - this reduces memory usage
@@ -85,6 +113,7 @@ func (db *DB) merge() error {
 		return fmt.Errorf("cleanup old files: %w", err)
 	}
 
+	job.db.setMergeDiagnostics(job.diagnostics)
 	return nil
 }
 
@@ -208,8 +237,29 @@ func (job *mergeJob) finalizeOutputs() error {
 // merge files (negative FileIDs) are processed before normal files (positive FileIDs), so
 // newer values will overwrite stale ones. This tradeoff saves significant memory.
 func (job *mergeJob) commit() error {
+	var peakBytes int64
+	for _, entry := range job.lookup {
+		if entry == nil || entry.hint == nil {
+			continue
+		}
+		peakBytes += estimateLookupBytes(entry.hint)
+	}
+
+	batches := 0
+	if peakBytes > 0 {
+		batches = 1
+	}
+
 	job.db.mu.Lock()
-	defer job.db.mu.Unlock()
+	lockStart := time.Now()
+	defer func() {
+		job.diagnostics = mergeDiagnostics{
+			peakLookupBytes: peakBytes,
+			maxLockHold:     time.Since(lockStart),
+			batches:         batches,
+		}
+		job.db.mu.Unlock()
+	}()
 
 	// Phase 1: Write all hints to hint files (even potentially stale ones)
 	// This ensures hints are available for fast index recovery
@@ -253,6 +303,13 @@ func (job *mergeJob) commit() error {
 	}
 
 	return nil
+}
+
+func estimateLookupBytes(hint *HintEntry) int64 {
+	if hint == nil {
+		return 0
+	}
+	return hint.Size() + mergeLookupEntryOverhead
 }
 
 // cleanupOldFiles removes the old data and hint files that were merged, as well as the manifest file.
