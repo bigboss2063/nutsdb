@@ -6,7 +6,6 @@ import (
 	"hash"
 	"hash/fnv"
 	"io"
-	"log"
 	"os"
 	"slices"
 	"time"
@@ -333,13 +332,6 @@ func (job *mergeJob) commit() error {
 		maxLockHold:     maxLockHold,
 		batches:         batches,
 	}
-	log.Printf("[merge] diagnostics: peak_lookup_bytes=%d max_lock_hold=%s batches=%d budget_bytes=%d batch_size=%d",
-		job.diagnostics.peakLookupBytes,
-		job.diagnostics.maxLockHold,
-		job.diagnostics.batches,
-		budgetBytes,
-		batchSize,
-	)
 
 	return nil
 }
