@@ -40,13 +40,17 @@ type mergeBenchDiagnosticsAgg struct {
 	peakSum     int64
 	lockHoldSum time.Duration
 	batchSum    int
+	originalSum int64
+	finalSum    int64
 }
 
-func (agg *mergeBenchDiagnosticsAgg) add(diag mergeDiagnostics) {
+func (agg *mergeBenchDiagnosticsAgg) add(diag EnhancedMergeDiagnostics, originalBytes, finalBytes int64) {
 	agg.count++
-	agg.peakSum += diag.peakLookupBytes
-	agg.lockHoldSum += diag.maxLockHold
-	agg.batchSum += diag.batches
+	agg.peakSum += diag.PeakLookupBytes
+	agg.lockHoldSum += diag.MaxLockHold
+	agg.batchSum += diag.Batches
+	agg.originalSum += originalBytes
+	agg.finalSum += finalBytes
 }
 
 func (agg *mergeBenchDiagnosticsAgg) report(b *testing.B) {
@@ -56,6 +60,12 @@ func (agg *mergeBenchDiagnosticsAgg) report(b *testing.B) {
 	b.ReportMetric(float64(agg.peakSum)/float64(agg.count), "peak_lookup_bytes")
 	b.ReportMetric(float64(agg.lockHoldSum.Microseconds())/float64(agg.count), "max_lock_hold_us")
 	b.ReportMetric(float64(agg.batchSum)/float64(agg.count), "batch_count")
+
+	// Calculate and report reduction ratio as percentage
+	if agg.originalSum > 0 {
+		reductionRatio := float64(agg.originalSum-agg.finalSum) / float64(agg.originalSum) * 100.0
+		b.ReportMetric(reductionRatio, "reduction_ratio_pct")
+	}
 }
 
 type mergeBenchLoadMetrics struct {
@@ -225,6 +235,10 @@ func benchmarkMergeScenario(b *testing.B, dataset mergeBenchDataset, scenario me
 
 		populateMergeBenchData(b, db, bucket, dataset)
 		ensureMultipleDataFiles(b, db, dir, bucket, dataset)
+		originalBytes, err := dataFileBytes(dir)
+		if err != nil {
+			b.Fatalf("measure original bytes: %v", err)
+		}
 
 		hotKeys := buildMergeBenchHotKeys(dataset)
 		writeValue := bytes.Repeat([]byte("w"), dataset.valueSize)
@@ -246,7 +260,11 @@ func benchmarkMergeScenario(b *testing.B, dataset mergeBenchDataset, scenario me
 		mergeDuration := time.Since(mergeStart)
 		b.StopTimer()
 
-		diagAgg.add(db.lastMergeDiagnostics())
+		finalBytes, err := dataFileBytes(dir)
+		if err != nil {
+			b.Fatalf("measure final bytes: %v", err)
+		}
+		diagAgg.add(db.GetEnhancedMergeDiagnostics(), originalBytes, finalBytes)
 		loadAgg.add(loadMetrics, mergeDuration)
 
 		close(stopCh)
@@ -332,11 +350,11 @@ func ensureMultipleDataFiles(b *testing.B, db *DB, dir, bucket string, dataset m
 	fillerVal := bytes.Repeat([]byte("x"), dataset.valueSize)
 	minFiles := 3
 	for attempts := 0; attempts < 10; attempts++ {
-		userIDs, _, err := enumerateDataFileIDs(dir)
+		count, err := countDataFiles(dir)
 		if err != nil {
-			b.Fatalf("enumerate data files: %v", err)
+			b.Fatalf("count data files: %v", err)
 		}
-		if len(userIDs) >= minFiles {
+		if count >= minFiles {
 			return
 		}
 		key := makeBenchKey(uint64(dataset.entries+attempts), dataset.keySize)

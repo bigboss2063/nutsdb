@@ -16,22 +16,62 @@ import (
 
 // mergeJob manages the entire merge operation lifecycle.
 type mergeJob struct {
-	db             *DB
-	pending        []int64
-	outputs        []*mergeOutput
-	manifest       *mergeManifest
-	oldData        []string
-	oldHints       []string
-	outputSeqBase  int
-	valueHasher    hash.Hash32
-	onRewriteEntry func(*core.Entry)
-	diagnostics    mergeDiagnostics
+	db               *DB
+	pending          []int64
+	outputs          []*mergeOutput
+	manifest         *mergeManifest
+	oldData          []string
+	oldHints         []string
+	outputSeqBase    int
+	valueHasher      hash.Hash32
+	onRewriteEntry   func(*core.Entry)
+	diagnostics      mergeDiagnostics
+	phaseTimings     map[string]time.Duration
+	entriesProcessed int64
+	bytesWritten     int64
 }
 
 type mergeDiagnostics struct {
-	peakLookupBytes int64
-	maxLockHold     time.Duration
-	batches         int
+	peakLookupBytes  int64
+	maxLockHold      time.Duration
+	batches          int
+	originalBytes    int64
+	finalBytes       int64
+	lockWaitTime     time.Duration
+	lockAcquisitions int
+}
+
+// EnhancedMergeDiagnostics provides comprehensive metrics about merge operations
+type EnhancedMergeDiagnostics struct {
+	PeakLookupBytes  int64
+	MaxLockHold      time.Duration
+	Batches          int
+	LockWaitTime     time.Duration
+	LockAcquisitions int
+	PhaseTimings     map[string]time.Duration
+	EntriesProcessed int64
+	BytesWritten     int64
+	SpaceReclaimed   int64
+}
+
+// toEnhanced converts mergeDiagnostics to EnhancedMergeDiagnostics with additional metrics
+func (job *mergeJob) toEnhanced() EnhancedMergeDiagnostics {
+	spaceReclaimed := job.diagnostics.originalBytes - job.diagnostics.finalBytes
+	if spaceReclaimed < 0 {
+		spaceReclaimed = 0
+	}
+
+	return EnhancedMergeDiagnostics{
+		PeakLookupBytes:  job.diagnostics.peakLookupBytes,
+		MaxLockHold:      job.diagnostics.maxLockHold,
+		Batches:          job.diagnostics.batches,
+		LockWaitTime:     job.diagnostics.lockWaitTime,
+		LockAcquisitions: job.diagnostics.lockAcquisitions,
+		PhaseTimings:     job.phaseTimings,
+		EntriesProcessed: job.entriesProcessed,
+		BytesWritten:     job.bytesWritten,
+		SpaceReclaimed:   spaceReclaimed,
+	}
 }
 
 func (db *DB) setMergeDiagnostics(diag mergeDiagnostics) {
@@ -51,6 +91,27 @@ func (db *DB) lastMergeDiagnostics() mergeDiagnostics {
 	diag := db.mergeDiagnostics
 	db.mergeDiagnosticsMu.RUnlock()
 	return diag
+}
+
+// GetEnhancedMergeDiagnostics returns the enhanced diagnostics from the last merge operation
+func (db *DB) GetEnhancedMergeDiagnostics() EnhancedMergeDiagnostics {
+	if db == nil {
+		return EnhancedMergeDiagnostics{}
+	}
+
+	db.mergeDiagnosticsMu.RLock()
+	defer db.mergeDiagnosticsMu.RUnlock()
+
+	// Note: We can't reconstruct full enhanced diagnostics from basic diagnostics
+	// This is a placeholder that returns what we have stored
+	return EnhancedMergeDiagnostics{
+		PeakLookupBytes:  db.mergeDiagnostics.peakLookupBytes,
+		MaxLockHold:      db.mergeDiagnostics.maxLockHold,
+		Batches:          db.mergeDiagnostics.batches,
+		LockWaitTime:     db.mergeDiagnostics.lockWaitTime,
+		LockAcquisitions: db.mergeDiagnostics.lockAcquisitions,
+		SpaceReclaimed:   db.mergeDiagnostics.originalBytes - db.mergeDiagnostics.finalBytes,
+	}
 }
 
 const mergeLookupEntryOverhead int64 = 64
@@ -80,37 +141,63 @@ type mergeOutput struct {
 // merge executes the complete merge operation.
 // This is the main entry point for the merge process, orchestrating all phases.
 func (db *DB) merge() error {
-	job := &mergeJob{db: db}
+	job := &mergeJob{
+		db:           db,
+		phaseTimings: make(map[string]time.Duration),
+	}
 
 	// Prepare merge job - validate state and enumerate files
+	phaseStart := time.Now()
 	if err := job.prepare(); err != nil {
 		return err
 	}
+	job.phaseTimings["prepare"] = time.Since(phaseStart)
 
 	// Enter writing state - prepare for merge operations
+	phaseStart = time.Now()
 	if err := job.enterWritingState(); err != nil {
 		return job.abort(err)
 	}
+	job.phaseTimings["enterWritingState"] = time.Since(phaseStart)
 
 	// Rewrite phase - process all pending files and create merge outputs
+	phaseStart = time.Now()
 	if err := job.rewrite(); err != nil {
 		return job.abort(err)
 	}
+	job.phaseTimings["rewrite"] = time.Since(phaseStart)
 
 	// Commit phase - update indexes and write hint files
+	phaseStart = time.Now()
 	if err := job.commit(); err != nil {
 		return job.abort(err)
 	}
+	job.phaseTimings["commit"] = time.Since(phaseStart)
 
 	// Finalize outputs - ensure all data is persisted
+	phaseStart = time.Now()
 	if err := job.finalizeOutputs(); err != nil {
 		return job.abort(err)
 	}
+	job.phaseTimings["finalize"] = time.Since(phaseStart)
+
+	// Calculate final total size after merge
+	var finalSize int64
+	for _, out := range job.outputs {
+		if out != nil && out.dataPath != "" {
+			if info, err := os.Stat(out.dataPath); err == nil {
+				finalSize += info.Size()
+			}
+		}
+	}
+	job.diagnostics.finalBytes = finalSize
 
 	// Clean up old files to reclaim disk space
+	phaseStart = time.Now()
 	if err := job.cleanupOldFiles(); err != nil {
 		return fmt.Errorf("cleanup old files: %w", err)
 	}
+	job.phaseTimings["cleanup"] = time.Since(phaseStart)
 
 	job.db.setMergeDiagnostics(job.diagnostics)
 	return nil
@@ -152,6 +239,16 @@ func (job *mergeJob) prepare() error {
 
 	// Sort files by ID for consistent processing order
 	slices.Sort(job.pending)
+
+	// Calculate original total size before merge
+	var originalSize int64
+	for _, fid := range job.pending {
+		path := getDataPath(fid, job.db.opt.Dir)
+		if info, err := os.Stat(path); err == nil {
+			originalSize += info.Size()
+		}
+	}
+	job.diagnostics.originalBytes = originalSize
 
 	// Sync active file if using mmap without sync
 	if !job.db.opt.SyncEnable && job.db.opt.RWMode == MMap {
@@ -208,11 +305,14 @@ func (job *mergeJob) enterWritingState() error {
 // rewrite processes all pending files and rewrites their valid entries to merge outputs.
 // This is the main phase where data compaction happens.
 func (job *mergeJob) rewrite() error {
+	var dataInTx core.DataInTx
 	for _, fid := range job.pending {
-		if err := job.rewriteFile(fid); err != nil {
+		if err := job.rewriteFile(fid, &dataInTx); err != nil {
 			return err
 		}
 	}
+	// Drop any trailing entries from an incomplete transaction.
+	dataInTx.Reset()
 	return nil
 }
 
@@ -255,7 +355,12 @@ func (job *mergeJob) commit() error {
 			return nil
 		}
 
+		lockWaitStart := time.Now()
 		job.db.mu.Lock()
+		lockWaitDuration := time.Since(lockWaitStart)
+		job.diagnostics.lockWaitTime += lockWaitDuration
+		job.diagnostics.lockAcquisitions++
+
 		lockStart := time.Now()
 		for _, entry := range batch {
 			job.applyLookup(entry)
@@ -327,11 +432,9 @@ func (job *mergeJob) commit() error {
 		job.oldHints = append(job.oldHints, getHintPath(fid, job.db.opt.Dir))
 	}
 
-	job.diagnostics = mergeDiagnostics{
-		peakLookupBytes: peakBytes,
-		maxLockHold:     maxLockHold,
-		batches:         batches,
-	}
+	job.diagnostics.peakLookupBytes = peakBytes
+	job.diagnostics.maxLockHold = maxLockHold
+	job.diagnostics.batches = batches
 
 	return nil
 }
@@ -591,7 +694,7 @@ func (job *mergeJob) abort(err error) error {
 
 // rewriteFile processes a single data file during merge, rewriting valid entries to new merge files.
 // It reads entries sequentially, filters out invalid/expired entries, and rewrites remaining entries.
-func (job *mergeJob) rewriteFile(fid int64) error {
+func (job *mergeJob) rewriteFile(fid int64, dataInTx *core.DataInTx) error {
 	path := getDataPath(fid, job.db.opt.Dir)
 	fr, err := newFileRecovery(path, job.db.opt.BufferSizeOfRecovery)
 	if err != nil {
@@ -600,6 +703,52 @@ func (job *mergeJob) rewriteFile(fid int64) error {
 	defer func() {
 		_ = fr.release()
 	}()
+
+	processCommittedEntry := func(entry *core.Entry) error {
+		if entry == nil {
+			return nil
+		}
+		// Skip filter entries and expired entries.
+		if entry.IsFilter() {
+			return nil
+		}
+		if job.db.ttlService.GetChecker().IsExpired(entry.Meta.TTL, entry.Meta.Timestamp) {
+			return nil
+		}
+
+		// Check if entry is still pending merge (not overwritten by newer version).
+		job.db.mu.RLock()
+		pending := job.db.isPendingMergeEntry(entry)
+		job.db.mu.RUnlock()
+		if !pending {
+			return nil
+		}
+
+		// Allow custom processing of entries during rewrite.
+		if job.onRewriteEntry != nil {
+			job.onRewriteEntry(entry)
+		}
+
+		// Mark entries as committed in merge outputs to flatten transactions.
+		committed := *entry
+		meta := *entry.Meta
+		meta.Status = Committed
+		committed.Meta = &meta
+
+		if err := job.writeEntry(&committed); err != nil {
+			return fmt.Errorf("failed to write entry: %w", err)
+		}
+		return nil
+	}
+
+	processCommittedTx := func() error {
+		for _, entry := range dataInTx.Es {
+			if err := processCommittedEntry(&entry.Entry); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 
 	off := int64(0)
 	for off < fr.size {
@@ -621,37 +770,34 @@ func (job *mergeJob) rewriteFile(fid int64) error {
 			continue
 		}
 
+		entryWhenRecovery := &core.EntryWhenRecovery{
+			Entry: *entry,
+			Fid:   fid,
+			Off:   off,
+		}
+
+		if dataInTx.TxId == 0 {
+			dataInTx.AppendEntry(entryWhenRecovery)
+			dataInTx.TxId = entry.Meta.TxID
+			dataInTx.StartOff = off
+		} else if dataInTx.IsSameTx(entryWhenRecovery) {
+			dataInTx.AppendEntry(entryWhenRecovery)
+		}
+
+		if entry.Meta.Status == Committed {
+			if err := processCommittedTx(); err != nil {
+				return err
+			}
+			dataInTx.Reset()
+			dataInTx.StartOff = off
+		}
+
+		if !dataInTx.IsSameTx(entryWhenRecovery) {
+			dataInTx.Reset()
+			dataInTx.StartOff = off
+		}
+
 		off += sz
-
-		// Skip entries that are not committed
-		if entry.Meta.Status != Committed {
-			continue
-		}
-		// Skip filter entries
-		if entry.IsFilter() {
-			continue
-		}
-		// Skip expired entries
-		if job.db.ttlService.GetChecker().IsExpired(entry.Meta.TTL, entry.Meta.Timestamp) {
-			continue
-		}
-
-		// Check if entry is still pending merge (not overwritten by newer version)
-		job.db.mu.RLock()
-		pending := job.db.isPendingMergeEntry(entry)
-		job.db.mu.RUnlock()
-		if !pending {
-			continue
-		}
-
-		// Allow custom processing of entries during rewrite
-		if job.onRewriteEntry != nil {
-			job.onRewriteEntry(entry)
-		}
-
-		if err := job.writeEntry(entry); err != nil {
-			return fmt.Errorf("failed to write entry: %w", err)
-		}
 	}
 
 	return nil
@@ -685,6 +831,10 @@ func (job *mergeJob) writeEntry(entry *core.Entry) error {
 		return fmt.Errorf("failed to write data at offset %d: %w", offset, err)
 	}
 	out.writeOff += int64(len(data))
+
+	// Track entries processed and bytes written
+	job.entriesProcessed++
+	job.bytesWritten += int64(len(data))
 
 	// Create hint entry for fast index lookup
 	hint := newHintEntryFromEntry(entry, out.fileID, uint64(offset))

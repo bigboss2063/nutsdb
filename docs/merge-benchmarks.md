@@ -30,6 +30,71 @@ Track merge performance for BTree-only workloads under concurrent read/write loa
 - BTree only
 - Hint file enabled and disabled
 
+## New Benchmark Scenarios
+
+### Update Pattern Scenarios
+
+Test merge performance with different update patterns to identify bottlenecks in specific workload scenarios.
+
+#### Patterns
+| pattern | description | overwrites | deletes | appends |
+| --- | --- | --- | --- | --- |
+| overwrite-heavy | High percentage of key overwrites | 70% | 0% | 0% |
+| delete-heavy | High percentage of key deletions | 0% | 50% | 0% |
+| append-only | Only new key insertions | 0% | 0% | 100% |
+| mixed | Balanced mix of operations | 30% | 20% | 50% |
+
+#### Datasets
+Same as standard benchmarks (small-100k, medium-500k, large-1m)
+
+#### Metrics
+- All standard metrics plus `reduction_ratio_pct` to measure data compaction effectiveness
+
+### Memory Budget Scenarios
+
+Test merge performance with different memory budget configurations to identify optimal settings.
+
+#### Memory Budgets
+| budget | size | description |
+| --- | --- | --- |
+| 16MB | 16 * 1024 * 1024 | Constrained memory environment |
+| 64MB | 64 * 1024 * 1024 | Default configuration |
+| 256MB | 256 * 1024 * 1024 | High memory environment |
+| 1GB | 1024 * 1024 * 1024 | Maximum memory environment |
+
+#### Datasets
+Same as standard benchmarks (small-100k, medium-500k, large-1m)
+
+#### Metrics
+- All standard metrics plus `bytes_per_mb_budget` to measure memory efficiency
+- `batch_count` increases as memory budget decreases
+- Optimal budget identification based on duration/memory balance
+
+### Concurrent Interaction Scenarios
+
+Test merge performance with concurrent read/write load to measure latency impact and throughput degradation.
+
+#### Concurrency Scenarios
+| scenario | readers | writers | description |
+| --- | --- | --- | --- |
+| read-heavy | 4 | 0 | High concurrent read load |
+| write-heavy | 0 | 2 | High concurrent write load |
+| balanced | 2 | 2 | Balanced read/write load |
+
+#### Datasets
+Same as standard benchmarks (small-100k, medium-500k, large-1m)
+
+#### Metrics
+- All standard metrics plus:
+  - `read_p50_us`, `read_p99_us`: Additional latency percentiles
+  - `write_p50_us`, `write_p99_us`: Additional latency percentiles
+  - `throughput_degradation_pct`: Throughput degradation compared to baseline
+  - `baseline_ops_per_sec`: Baseline throughput without merge
+  - `merge_ops_per_sec`: Throughput during merge
+
+#### Baseline Measurement
+Each concurrent scenario first measures baseline throughput without merge (3 seconds), then measures throughput during merge to calculate degradation percentage.
+
 ## Metrics
 - `ms/op`: time per merge (derived from `ns/op`)
 - `MiB/op`: memory allocated per merge (derived from `B/op`)
@@ -37,18 +102,63 @@ Track merge performance for BTree-only workloads under concurrent read/write loa
 - `peak_lookup_bytes`: peak in-flight lookup memory tracked during commit
 - `max_lock_hold_us`: max exclusive lock hold time per commit batch (proxy for blocking time)
 - `batch_count`: average number of commit batches per merge
+- `reduction_ratio_pct`: data reduction ratio as percentage ((original - final) / original * 100)
+- `bytes_per_mb_budget`: memory efficiency (bytes processed per MB of memory budget)
 - `read_ops_per_sec`: read throughput during merge (hotset reads)
+- `read_p50_us`: p50 read latency during merge (sampled)
 - `read_p95_us`: p95 read latency during merge (sampled)
+- `read_p99_us`: p99 read latency during merge (sampled)
 - `read_max_us`: max read latency during merge (sampled)
 - `write_ops_per_sec`: write throughput during merge (hotset updates)
+- `write_p50_us`: p50 write latency during merge (sampled)
 - `write_p95_us`: p95 write latency during merge (sampled)
+- `write_p99_us`: p99 write latency during merge (sampled)
 - `write_max_us`: max write latency during merge (sampled)
+- `throughput_degradation_pct`: throughput degradation percentage compared to baseline
+- `baseline_ops_per_sec`: baseline throughput without merge
+- `merge_ops_per_sec`: throughput during merge
+- `degradation_pct`: throughput degradation percentage
 
-Note: Read/write latency metrics are sampled every 20 ops to limit overhead. Concurrent load begins when merge starts, so throughput and latency reflect the merge window.
+Note: Read/write latency metrics are sampled every 100 ops to limit overhead. Concurrent load begins when merge starts, so throughput and latency reflect the merge window.
 
 ## How To Run
+
+### Standard Merge Benchmarks
+```bash
+GOCACHE=$PWD/.gocache-mergebench go test -run '^$' -bench BenchmarkMerge -benchmem -count=1
 ```
-GOCACHE=$PWD/.gocache-mergebench go test -run '^$' -bench Merge -benchmem -count=1
+
+### Update Pattern Benchmarks
+Test merge performance with different update patterns (overwrite-heavy, delete-heavy, append-only, mixed):
+```bash
+go test -run '^$' -bench BenchmarkMergePatterns -benchmem -count=1
+```
+
+### Memory Budget Benchmarks
+Test merge performance with different memory budget configurations (16MB, 64MB, 256MB, 1GB):
+```bash
+go test -run '^$' -bench BenchmarkMergeMemoryBudget -benchmem -count=1
+```
+
+Identify optimal memory budget for each dataset:
+```bash
+go test -run '^$' -bench BenchmarkMergeMemoryOptimal -benchmem -count=1
+```
+
+### Concurrent Interaction Benchmarks
+Test merge performance with concurrent read/write load (read-heavy, write-heavy, balanced):
+```bash
+go test -run '^$' -bench BenchmarkMergeConcurrent -benchmem -count=1
+```
+
+Measure throughput degradation during merge:
+```bash
+go test -run '^$' -bench BenchmarkMergeConcurrentDegradation -benchmem -count=1
+```
+
+### Run All Benchmarks
+```bash
+go test -run '^$' -bench 'BenchmarkMerge.*' -benchmem -count=1
 ```
 
 ## Runs

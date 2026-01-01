@@ -2081,7 +2081,8 @@ func TestMergeRewriteFileSkipsCorruptedEntries(t *testing.T) {
 		outputs: []*mergeOutput{{fileID: GetMergeFileID(0), dataFile: &DataFile{rwManager: mock}}},
 	}
 
-	if err := job.rewriteFile(fid); err != nil {
+	var dataInTx core.DataInTx
+	if err := job.rewriteFile(fid, &dataInTx); err != nil {
 		t.Fatalf("rewriteFile: %v", err)
 	}
 
