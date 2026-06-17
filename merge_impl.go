@@ -13,7 +13,7 @@ import (
 	"github.com/nutsdb/nutsdb/internal/utils"
 )
 
-// mergeV2Job manages the entire merge operation lifecycle.
+// mergeJob manages the entire merge operation lifecycle.
 //
 // # Memory Efficiency Design
 //
@@ -47,7 +47,7 @@ import (
 // This design trades hint file size and rebuild time for dramatically reduced memory usage
 // during merge operations, which is critical for Bitcask-based systems that already
 // consume significant memory for in-memory indexes.
-type mergeV2Job struct {
+type mergeJob struct {
 	db             *DB
 	pending        []int64
 	outputs        []*mergeOutput
@@ -83,10 +83,10 @@ type mergeOutput struct {
 	finalized bool           // Whether this output has been finalized
 }
 
-// mergeV2 executes the complete merge operation using the V2 algorithm.
+// merge executes the complete merge operation using the merge algorithm.
 // This is the main entry point for the merge process, orchestrating all phases.
-func (db *DB) mergeV2() error {
-	job := &mergeV2Job{db: db}
+func (db *DB) merge() error {
+	job := &mergeJob{db: db}
 
 	// Prepare merge job - validate state and enumerate files
 	if err := job.prepare(); err != nil {
@@ -124,7 +124,7 @@ func (db *DB) mergeV2() error {
 
 // prepare initializes the merge job by validating state, enumerating files, and setting up the database.
 // It ensures the database is ready for merge and creates a new active file for ongoing writes.
-func (job *mergeV2Job) prepare() error {
+func (job *mergeJob) prepare() error {
 	job.db.mu.Lock()
 
 	// Note: Concurrent merge prevention is handled by mergeWorker.performMerge()
@@ -195,13 +195,13 @@ func (job *mergeV2Job) prepare() error {
 // finish cleans up the merge job.
 // Always called via defer to ensure cleanup even if merge fails.
 // Note: The isMerging flag is managed by mergeWorker.performMerge()
-func (job *mergeV2Job) finish() {
+func (job *mergeJob) finish() {
 	// No-op: State is managed by mergeWorker
 }
 
 // enterWritingState initializes the merge job for writing entries.
 // Creates the merge manifest and prepares necessary data structures.
-func (job *mergeV2Job) enterWritingState() error {
+func (job *mergeJob) enterWritingState() error {
 	// Initialize lookup entries for tracking merged entries
 	job.lookup = make([]*mergeLookupEntry, 0)
 
@@ -226,7 +226,7 @@ func (job *mergeV2Job) enterWritingState() error {
 
 // rewrite processes all pending files and rewrites their valid entries to merge outputs.
 // This is the main phase where data compaction happens.
-func (job *mergeV2Job) rewrite() error {
+func (job *mergeJob) rewrite() error {
 	for _, fid := range job.pending {
 		if err := job.rewriteFile(fid); err != nil {
 			return err
@@ -237,7 +237,7 @@ func (job *mergeV2Job) rewrite() error {
 
 // finalizeOutputs ensures all output files are properly closed and synced to disk.
 // This must be called after all entries have been written.
-func (job *mergeV2Job) finalizeOutputs() error {
+func (job *mergeJob) finalizeOutputs() error {
 	for _, out := range job.outputs {
 		if err := out.finalize(); err != nil {
 			return err
@@ -251,7 +251,7 @@ func (job *mergeV2Job) finalizeOutputs() error {
 // we'll write the stale version to the hint file. This is safe because during index rebuild,
 // merge files (negative FileIDs) are processed before normal files (positive FileIDs), so
 // newer values will overwrite stale ones. This tradeoff saves significant memory.
-func (job *mergeV2Job) commit() error {
+func (job *mergeJob) commit() error {
 	job.db.mu.Lock()
 	defer job.db.mu.Unlock()
 
@@ -301,7 +301,7 @@ func (job *mergeV2Job) commit() error {
 
 // cleanupOldFiles removes the old data and hint files that were merged, as well as the manifest file.
 // This is called after a successful merge to reclaim disk space.
-func (job *mergeV2Job) cleanupOldFiles() error {
+func (job *mergeJob) cleanupOldFiles() error {
 	// Close and remove old data files
 	for _, path := range job.oldData {
 		_ = job.db.dataFileManager.CloseByPath(path)
@@ -321,7 +321,7 @@ func (job *mergeV2Job) cleanupOldFiles() error {
 
 // abort cleans up all created files when a merge fails and returns the original error.
 // It ensures no partial merge state is left behind and combines any cleanup errors.
-func (job *mergeV2Job) abort(err error) error {
+func (job *mergeJob) abort(err error) error {
 	var errs []error
 
 	// Clean up all output files created during the failed merge
@@ -358,7 +358,7 @@ func (job *mergeV2Job) abort(err error) error {
 
 // rewriteFile processes a single data file during merge, rewriting valid entries to new merge files.
 // It reads entries sequentially, filters out invalid/expired entries, and rewrites remaining entries.
-func (job *mergeV2Job) rewriteFile(fid int64) error {
+func (job *mergeJob) rewriteFile(fid int64) error {
 	path := getDataPath(fid, job.db.opt.Dir)
 	fr, err := newFileRecovery(path, job.db.opt.BufferSizeOfRecovery)
 	if err != nil {
@@ -426,7 +426,7 @@ func (job *mergeV2Job) rewriteFile(fid int64) error {
 
 // writeEntry writes an entry to the appropriate merge output file and creates the corresponding hint entry.
 // It also calculates value hashes for Set and SortedSet data structures to support duplicate detection.
-func (job *mergeV2Job) writeEntry(entry *core.Entry) error {
+func (job *mergeJob) writeEntry(entry *core.Entry) error {
 	if entry == nil {
 		return fmt.Errorf("cannot write nil entry")
 	}
@@ -480,7 +480,7 @@ func (job *mergeV2Job) writeEntry(entry *core.Entry) error {
 
 // ensureOutput returns the appropriate output file for writing entries of the given size.
 // If no output exists or the current output would exceed segment size, creates a new output.
-func (job *mergeV2Job) ensureOutput(size int64) (*mergeOutput, error) {
+func (job *mergeJob) ensureOutput(size int64) (*mergeOutput, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("invalid size: %d", size)
 	}
@@ -496,7 +496,7 @@ func (job *mergeV2Job) ensureOutput(size int64) (*mergeOutput, error) {
 		return job.newOutput()
 	}
 
-	// Check if adding this entry would exceed the segment size limit
+	// Check if adding this entry will exceed the segment size limit
 	if cur.writeOff+size > job.db.opt.SegmentSize {
 		return job.newOutput()
 	}
@@ -506,7 +506,7 @@ func (job *mergeV2Job) ensureOutput(size int64) (*mergeOutput, error) {
 
 // newOutput creates a new merge output file with associated hint file collector.
 // It generates unique file IDs using merge sequence numbers and cleans up any existing files.
-func (job *mergeV2Job) newOutput() (*mergeOutput, error) {
+func (job *mergeJob) newOutput() (*mergeOutput, error) {
 	seq := job.outputSeqBase + len(job.outputs)
 	fileID := GetMergeFileID(seq)
 	dataPath := getMergeDataPath(job.db.opt.Dir, seq)
@@ -612,7 +612,7 @@ func updateRecordWithHintIfNewer(record *core.Record, hint *HintEntry) bool {
 // IMPORTANT: We check timestamps to avoid overwriting newer entries that were written
 // after the merge started. The initial check happens in rewriteFile, but the index mutex
 // is released before commit, so newer entries might exist in the index now.
-func (job *mergeV2Job) applyLookup(entry *mergeLookupEntry) {
+func (job *mergeJob) applyLookup(entry *mergeLookupEntry) {
 	if entry == nil || entry.hint == nil {
 		return
 	}
