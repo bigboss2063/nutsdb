@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2281,29 +2280,14 @@ func TestDB_HintFileMissingFallback(t *testing.T) {
 	removeDir(opts.Dir)
 }
 
-// enumerateDataFilesInDir returns all data file IDs in the directory
+// enumerateDataFilesInDir returns all data file IDs in the directory,
+// including both user data files (positive IDs) and merge files (negative IDs).
 func enumerateDataFilesInDir(dir string) []int64 {
-	entries, err := os.ReadDir(dir)
+	userIDs, mergeIDs, err := enumerateDataFileIDs(dir)
 	if err != nil {
 		return nil
 	}
-
-	var fileIDs []int64
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		// Check if it's a data file (ends with .data)
-		if strings.HasSuffix(name, DataSuffix) {
-			// Extract file ID from filename
-			idStr := strings.TrimSuffix(name, DataSuffix)
-			if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
-				fileIDs = append(fileIDs, id)
-			}
-		}
-	}
-	return fileIDs
+	return append(userIDs, mergeIDs...)
 }
 
 func TestDB_HintFileCorruptedFallback(t *testing.T) {
