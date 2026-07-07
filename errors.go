@@ -1,6 +1,10 @@
 package nutsdb
 
-import "github.com/nutsdb/nutsdb/internal/core"
+import (
+	"errors"
+
+	"github.com/nutsdb/nutsdb/internal/core"
+)
 
 // Public errors. These are re-exports of the definitions in internal/core so
 // that they are part of the nutsdb public API while keeping a single error
@@ -14,4 +18,13 @@ var (
 	// ErrCapacity is returned when an invalid capacity is provided.
 	ErrCapacity  = core.ErrCapacity
 	ErrEntryZero = core.ErrEntryZero
+
+	ErrClosed        = errors.New("nutsdb: db closed")
+	ErrTxClosed      = errors.New("nutsdb: tx closed")
+	ErrReadOnly      = errors.New("nutsdb: tx is read-only")
+	ErrNotFound      = errors.New("nutsdb: key not found")
+	ErrKeyEmpty      = errors.New("nutsdb: key cannot be empty")
+	ErrBucket        = errors.New("nutsdb: bucket cannot be empty")
+	ErrCorrupted     = errors.New("nutsdb: corrupted data")
+	ErrStoreRequired = errors.New("nutsdb: store manager is required")
 )
