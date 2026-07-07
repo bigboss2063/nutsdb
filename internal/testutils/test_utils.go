@@ -58,11 +58,9 @@ func GenerateRecords(count int) []*core.Record {
 	rand.Seed(time.Now().UnixNano())
 	records := make([]*core.Record, count)
 	for i := 0; i < count; i++ {
-		key := GetTestBytes(i)
 		val := GetRandomBytes(24)
 
 		record := &core.Record{
-			Key:       key,
 			Value:     val,
 			FileID:    int64(i),
 			DataPos:   uint64(rand.Uint32()),

@@ -16,9 +16,7 @@ package core
 
 const Persistent uint32 = 0
 
-// Record means item of indexes in memory
 type Record struct {
-	Key       []byte
 	Value     []byte
 	FileID    int64
 	DataPos   uint64
@@ -31,11 +29,6 @@ type Record struct {
 // NewRecord generate a record Obj
 func NewRecord() *Record {
 	return new(Record)
-}
-
-func (r *Record) WithKey(k []byte) *Record {
-	r.Key = k
-	return r
 }
 
 // WithValue set the Value to Record

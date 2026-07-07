@@ -156,7 +156,7 @@ func (s *testStore) Put(ctx context.Context, key []byte, value *core.Record) err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data[string(key)] = cloneCoreRecord(value).WithKey(cloneBytes(key))
+	s.data[string(key)] = cloneCoreRecord(value)
 	return nil
 }
 

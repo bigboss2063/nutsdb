@@ -24,11 +24,12 @@ import (
 var benchRecord = core.NewRecord().WithValue([]byte("benchmark-value-payload"))
 
 func benchKey(i int) []byte {
-	return []byte(fmt.Sprintf("memstore-bench-key-%012d", i))
+	return fmt.Appendf(nil, "memstore-bench-key-%012d", i)
 }
 
 func benchRecordForKey(key []byte) *core.Record {
-	return core.NewRecord().WithKey(key).WithValue(benchRecord.Value)
+	_ = key
+	return core.NewRecord().WithValue(benchRecord.Value)
 }
 
 func newPopulatedMemStore(b *testing.B, n int) (MemStore, [][]byte) {
@@ -36,7 +37,7 @@ func newPopulatedMemStore(b *testing.B, n int) (MemStore, [][]byte) {
 
 	ms := NewMemStore()
 	keys := make([][]byte, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := benchKey(i)
 		keys[i] = key
 		if err := ms.Put(key, benchRecordForKey(key)); err != nil {
@@ -50,8 +51,8 @@ func BenchmarkMemStore_Put(b *testing.B) {
 	ms := NewMemStore()
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for i := 0; b.Loop(); i++ {
 		key := benchKey(i)
 		if err := ms.Put(key, benchRecordForKey(key)); err != nil {
 			b.Fatalf("put: %v", err)
@@ -113,7 +114,7 @@ func BenchmarkMemStore_Delete(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000} {
 		b.Run(fmt.Sprintf("size=%d", n), func(b *testing.B) {
 			keys := make([][]byte, n)
-			for i := 0; i < n; i++ {
+			for i := range n {
 				keys[i] = benchKey(i)
 			}
 
@@ -164,8 +165,8 @@ func BenchmarkMemStore_Mixed(b *testing.B) {
 	ms, keys := newPopulatedMemStore(b, storeSize)
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for i := 0; b.Loop(); i++ {
 		switch i % 4 {
 		case 0:
 			key := keys[i%storeSize]

@@ -24,8 +24,6 @@ import (
 func TestRecord(t *testing.T) {
 	r := require.New(t)
 	rec := core.NewRecord()
-	rec = rec.WithKey([]byte("111"))
-	r.Equal([]byte("111"), rec.Key)
 
 	rec = rec.WithValue([]byte("1112"))
 	r.Equal([]byte("1112"), rec.Value)

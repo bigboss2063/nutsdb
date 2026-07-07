@@ -78,8 +78,8 @@ func (tx *tx) Put(ctx context.Context, bucket string, key, value []byte) error {
 		return err
 	}
 	physicalValue := tx.db.codec.encodeValue(value)
-	rec := core.NewRecord().WithKey(cloneBytes(physicalKey)).WithValue(physicalValue).WithValueSize(uint32(len(physicalValue)))
-	tx.putMutation(rec, false)
+	rec := core.NewRecord().WithValue(physicalValue).WithValueSize(uint32(len(physicalValue)))
+	tx.putMutation(physicalKey, rec, false)
 	return nil
 }
 
@@ -91,7 +91,7 @@ func (tx *tx) Delete(ctx context.Context, bucket string, key []byte) error {
 	if err != nil {
 		return err
 	}
-	tx.putMutation(core.NewRecord().WithKey(cloneBytes(physicalKey)), true)
+	tx.putMutation(physicalKey, nil, true)
 	return nil
 }
 
@@ -130,7 +130,7 @@ func (tx *tx) Scan(ctx context.Context, bucket string, r Range, fn func(context.
 	}
 	for _, key := range tx.order {
 		m := tx.pending[key]
-		match, userKey, err := physicalKeyInRange(m.record.Key, prefix, r, tx.db.codec)
+		match, userKey, err := physicalKeyInRange([]byte(key), prefix, r, tx.db.codec)
 		if err != nil {
 			return err
 		}
@@ -172,8 +172,8 @@ func (tx *tx) Scan(ctx context.Context, bucket string, r Range, fn func(context.
 	return nil
 }
 
-func (tx *tx) putMutation(record *core.Record, deleted bool) {
-	key := string(record.Key)
+func (tx *tx) putMutation(physicalKey []byte, record *core.Record, deleted bool) {
+	key := string(physicalKey)
 	if _, ok := tx.pending[key]; !ok {
 		tx.order = append(tx.order, key)
 	}
@@ -196,13 +196,13 @@ func (tx *tx) commit(ctx context.Context) error {
 	for _, key := range tx.order {
 		m := tx.pending[key]
 		if m.deleted {
-			deletes = append(deletes, cloneBytes(m.record.Key))
+			deletes = append(deletes, cloneBytes([]byte(key)))
 			continue
 		}
 		puts = append(puts, struct {
 			Key   []byte
 			Value *core.Record
-		}{Key: cloneBytes(m.record.Key), Value: cloneCoreRecord(m.record)})
+		}{Key: cloneBytes([]byte(key)), Value: cloneCoreRecord(m.record)})
 	}
 	if len(puts) > 0 {
 		if err := tx.db.store.BatchPut(ctx, puts); err != nil {
@@ -256,7 +256,6 @@ func cloneCoreRecord(r *core.Record) *core.Record {
 		return nil
 	}
 	cp := *r
-	cp.Key = cloneBytes(r.Key)
 	cp.Value = cloneBytes(r.Value)
 	return &cp
 }

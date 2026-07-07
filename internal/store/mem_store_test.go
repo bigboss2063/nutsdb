@@ -25,14 +25,14 @@ import (
 )
 
 func newTestRecord(key, value []byte) *core.Record {
-	return core.NewRecord().WithKey(key).WithValue(value)
+	_ = key
+	return core.NewRecord().WithValue(value)
 }
 
 func requireRecordEqual(t *testing.T, expect, got *core.Record) {
 	t.Helper()
 	require.NotNil(t, got)
 	require.Equal(t, expect.Value, got.Value)
-	require.Equal(t, expect.Key, got.Key)
 }
 
 func assertMemStoreState(t *testing.T, ms MemStore, want map[string]*core.Record) {
@@ -126,13 +126,10 @@ func TestMemStore_DeleteIdempotent(t *testing.T) {
 
 func TestMemStore_IterateSortedOrder(t *testing.T) {
 	ms := NewMemStore()
-	entries := []*core.Record{
-		newTestRecord([]byte("c"), []byte("3")),
-		newTestRecord([]byte("a"), []byte("1")),
-		newTestRecord([]byte("b"), []byte("2")),
-	}
-	for _, rec := range entries {
-		require.NoError(t, ms.Put(rec.Key, rec))
+	putKeys := [][]byte{[]byte("c"), []byte("a"), []byte("b")}
+	putVals := [][]byte{[]byte("3"), []byte("1"), []byte("2")}
+	for i, k := range putKeys {
+		require.NoError(t, ms.Put(k, newTestRecord(k, putVals[i])))
 	}
 
 	var keys [][]byte
@@ -191,14 +188,14 @@ func TestMemStore_RandomInsert(t *testing.T) {
 		key []byte
 		rec *core.Record
 	}, n)
-	for i := 0; i < n; i++ {
-		key := []byte(fmt.Sprintf("key-%04d", i))
+	for i := range n {
+		key := fmt.Appendf(nil, "key-%04d", i)
 		entries[i] = struct {
 			key []byte
 			rec *core.Record
 		}{
 			key: key,
-			rec: newTestRecord(key, []byte(fmt.Sprintf("val-%04d", i))),
+			rec: newTestRecord(key, fmt.Appendf(nil, "val-%04d", i)),
 		}
 	}
 
@@ -232,14 +229,14 @@ func TestMemStore_RandomInsertAndDelete(t *testing.T) {
 		key []byte
 		rec *core.Record
 	}, n)
-	for i := 0; i < n; i++ {
-		key := []byte(fmt.Sprintf("key-%06d", i))
+	for i := range n {
+		key := fmt.Appendf(nil, "key-%06d", i)
 		entries[i] = struct {
 			key []byte
 			rec *core.Record
 		}{
 			key: key,
-			rec: newTestRecord(key, []byte(fmt.Sprintf("val-%06d", i))),
+			rec: newTestRecord(key, fmt.Appendf(nil, "val-%06d", i)),
 		}
 	}
 
@@ -326,14 +323,14 @@ func TestMemStore_DeleteStructuralCases(t *testing.T) {
 	t.Run("delete_in_sorted_order", func(t *testing.T) {
 		ms := NewMemStore()
 		want := make(map[string]*core.Record)
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			key := fmt.Sprintf("sorted-%02d", i)
 			rec := newTestRecord([]byte(key), []byte("v-"+key))
 			require.NoError(t, ms.Put([]byte(key), rec))
 			want[key] = rec
 		}
 
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			key := fmt.Sprintf("sorted-%02d", i)
 			got, ok := ms.Delete([]byte(key))
 			require.True(t, ok)
@@ -346,7 +343,7 @@ func TestMemStore_DeleteStructuralCases(t *testing.T) {
 	t.Run("delete_in_reverse_sorted_order", func(t *testing.T) {
 		ms := NewMemStore()
 		want := make(map[string]*core.Record)
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			key := fmt.Sprintf("rev-%02d", i)
 			rec := newTestRecord([]byte(key), []byte("v-"+key))
 			require.NoError(t, ms.Put([]byte(key), rec))
