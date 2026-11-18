@@ -123,7 +123,7 @@ func (db *DB) mergeLegacy() error {
 
 				// Index reads can race with commits; use a transaction to avoid inconsistencies.
 				err := db.Update(func(tx *Tx) error {
-					if ok := db.isPendingMergeEntry(entry); ok {
+					if ok := db.isPendingMergeEntry(entry, pendingMergeFId, uint64(off)); ok {
 						bucket, err := db.bucketMgr.GetBucketById(entry.Meta.BucketId)
 						if err != nil {
 							return err
@@ -290,12 +290,12 @@ func (db *DB) buildHintFilesAfterMerge(startFileID, endFileID int64) error {
 	return nil
 }
 
-func (db *DB) isPendingMergeEntry(entry *core.Entry) bool {
+func (db *DB) isPendingMergeEntry(entry *core.Entry, fid int64, off uint64) bool {
 	switch {
 	case entry.IsBelongsToBTree():
-		return db.isPendingBtreeEntry(entry)
+		return db.isPendingBtreeEntry(entry, fid, off)
 	case entry.IsBelongsToList():
-		return db.isPendingListEntry(entry)
+		return db.isPendingListEntry(entry, fid, off)
 	case entry.IsBelongsToSet():
 		return db.isPendingSetEntry(entry)
 	case entry.IsBelongsToSortSet():
@@ -304,7 +304,10 @@ func (db *DB) isPendingMergeEntry(entry *core.Entry) bool {
 	return false
 }
 
-func (db *DB) isPendingBtreeEntry(entry *core.Entry) bool {
+// isPendingBtreeEntry reports whether the on-disk entry is the version the
+// index currently points at. The index position is the identity: hint files
+// do not store TxID, and loadHintFile therefore rebuilds records with TxID 0.
+func (db *DB) isPendingBtreeEntry(entry *core.Entry, fid int64, off uint64) bool {
 	idx, exist := db.Index.BTree.exist(entry.Meta.BucketId)
 	if !exist {
 		return false
@@ -320,11 +323,7 @@ func (db *DB) isPendingBtreeEntry(entry *core.Entry) bool {
 		return false
 	}
 
-	if r.TxID != entry.Meta.TxID || r.Timestamp != entry.Meta.Timestamp {
-		return false
-	}
-
-	return true
+	return r.FileID == fid && r.DataPos == off
 }
 
 func (db *DB) isPendingSetEntry(entry *core.Entry) bool {
@@ -355,7 +354,7 @@ func (db *DB) isPendingZSetEntry(entry *core.Entry) bool {
 	return true
 }
 
-func (db *DB) isPendingListEntry(entry *core.Entry) bool {
+func (db *DB) isPendingListEntry(entry *core.Entry, fid int64, off uint64) bool {
 	var userKeyStr string
 	var curSeq uint64
 	var userKey []byte
@@ -402,7 +401,7 @@ func (db *DB) isPendingListEntry(entry *core.Entry) bool {
 			return false
 		}
 
-		if !bytes.Equal(r.Key, entry.Key) || r.TxID != entry.Meta.TxID || r.Timestamp != entry.Meta.Timestamp {
+		if !bytes.Equal(r.Key, entry.Key) || r.FileID != fid || r.DataPos != off {
 			return false
 		}
 
