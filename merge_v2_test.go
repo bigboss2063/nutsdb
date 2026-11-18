@@ -2042,10 +2042,16 @@ func TestMergeV2RewriteFileSkipsCorruptedEntries(t *testing.T) {
 
 	goodEntry := createTestEntry(bucketID, []byte("good"), []byte("keep"), DataSetFlag, Committed, Persistent, now, 5, DataStructureBTree)
 
-	for _, e := range append(entries, goodEntry) {
-		if _, err := f.Write(e.Encode()); err != nil {
+	goodOff := int64(0)
+	for _, e := range entries {
+		n, err := f.Write(e.Encode())
+		if err != nil {
 			t.Fatalf("write entry: %v", err)
 		}
+		goodOff += int64(n)
+	}
+	if _, err := f.Write(goodEntry.Encode()); err != nil {
+		t.Fatalf("write entry: %v", err)
 	}
 
 	if _, err := f.Write([]byte{0x01, 0x02, 0x03}); err != nil {
@@ -2058,7 +2064,7 @@ func TestMergeV2RewriteFileSkipsCorruptedEntries(t *testing.T) {
 	bt := data.NewBTree(0) // bucketId 0 for test
 	bt.InsertRecord(goodEntry.Key, (&core.Record{}).
 		WithFileId(fid).
-		WithDataPos(0).
+		WithDataPos(uint64(goodOff)).
 		WithTimestamp(goodEntry.Meta.Timestamp).
 		WithTTL(goodEntry.Meta.TTL).
 		WithTxID(goodEntry.Meta.TxID).
@@ -2463,5 +2469,155 @@ func TestMergeV2ApplyLookupIgnoresMissingTargets(t *testing.T) {
 		if r.FileID != 500 || r.DataPos != 5000 {
 			t.Fatalf("record not updated: %+v", r)
 		}
+	}
+}
+
+func TestMergeV2SecondMergeAfterHintReload(t *testing.T) {
+	value := bytes.Repeat([]byte("v"), 200)
+
+	for _, hint := range []bool{false, true} {
+		for _, mode := range []EntryIdxMode{HintKeyValAndRAMIdxMode, HintKeyAndRAMIdxMode} {
+			name := fmt.Sprintf("hint=%v/mode=%d", hint, mode)
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				opts := DefaultOptions
+				opts.Dir = dir
+				opts.SegmentSize = 1024
+				opts.EnableMergeV2 = true
+				opts.EnableHintFile = hint
+				opts.EntryIdxMode = mode
+
+				db, err := Open(opts)
+				if err != nil {
+					t.Fatalf("open: %v", err)
+				}
+
+				const bucket = "bucket"
+				const n = 80
+				if err := db.Update(func(tx *Tx) error {
+					return tx.NewBucket(DataStructureBTree, bucket)
+				}); err != nil {
+					t.Fatalf("bucket: %v", err)
+				}
+				for i := 0; i < n; i++ {
+					key := []byte(fmt.Sprintf("k-%03d", i))
+					if err := db.Update(func(tx *Tx) error {
+						return tx.Put(bucket, key, value, Persistent)
+					}); err != nil {
+						t.Fatalf("put: %v", err)
+					}
+				}
+				if err := db.Merge(); err != nil {
+					t.Fatalf("merge1: %v", err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatalf("close: %v", err)
+				}
+
+				db, err = Open(opts)
+				if err != nil {
+					t.Fatalf("reopen: %v", err)
+				}
+				if err := db.Merge(); err != nil {
+					t.Fatalf("merge2: %v", err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatalf("close2: %v", err)
+				}
+
+				db, err = Open(opts)
+				if err != nil {
+					t.Fatalf("reopen2: %v", err)
+				}
+				defer func() {
+					_ = db.Close()
+				}()
+
+				missing := 0
+				if err := db.View(func(tx *Tx) error {
+					for i := 0; i < n; i++ {
+						got, err := tx.Get(bucket, []byte(fmt.Sprintf("k-%03d", i)))
+						if err != nil || !bytes.Equal(got, value) {
+							missing++
+						}
+					}
+					return nil
+				}); err != nil {
+					t.Fatalf("view: %v", err)
+				}
+				if missing != 0 {
+					t.Fatalf("lost %d/%d keys after the second merge", missing, n)
+				}
+			})
+		}
+	}
+}
+
+func TestMergeV2ListSecondMergeAfterHintReload(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions
+	opts.Dir = dir
+	opts.SegmentSize = 1024
+	opts.EnableMergeV2 = true
+	opts.EnableHintFile = true
+
+	db, err := Open(opts)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	const bucket = "list"
+	const n = 40
+	if err := db.Update(func(tx *Tx) error {
+		return tx.NewBucket(DataStructureList, bucket)
+	}); err != nil {
+		t.Fatalf("bucket: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		item := []byte(fmt.Sprintf("v-%03d-%s", i, string(bytes.Repeat([]byte("x"), 80))))
+		if err := db.Update(func(tx *Tx) error {
+			return tx.RPush(bucket, []byte("k"), item)
+		}); err != nil {
+			t.Fatalf("push: %v", err)
+		}
+	}
+	if err := db.Merge(); err != nil {
+		t.Fatalf("merge1: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	db, err = Open(opts)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if err := db.Merge(); err != nil {
+		t.Fatalf("merge2: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close2: %v", err)
+	}
+
+	db, err = Open(opts)
+	if err != nil {
+		t.Fatalf("reopen2: %v", err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	var got int
+	if err := db.View(func(tx *Tx) error {
+		items, err := tx.LRange(bucket, []byte("k"), 0, -1)
+		if err != nil {
+			return err
+		}
+		got = len(items)
+		return nil
+	}); err != nil {
+		t.Fatalf("lrange: %v", err)
+	}
+	if got != n {
+		t.Fatalf("list len=%d want %d", got, n)
 	}
 }
